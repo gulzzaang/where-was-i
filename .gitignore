@@ -1,0 +1,4 @@
+__pycache__/
+herdr-mod/*/jsconfig.json
+herdr-mod/*/*.d.ts
+.DS_Store

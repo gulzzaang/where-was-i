@@ -417,8 +417,9 @@ export default class WhereWasI extends View {
         ]));
       }
       const nodes = [];
-      p.cards.forEach((k, i) => {
-        if (i > 0) nodes.push(this.connector(k.state === "working", t));
+      // 최근 할 일이 위로(내림차순). 펼침 상태는 원래 번호로 기억한다.
+      p.cards.map((k, i) => [k, i]).reverse().forEach(([k, i], n) => {
+        if (n > 0) nodes.push(this.connector(k.state === "working", t));
         nodes.push(this.card(k, i, t));
       });
       parts.push(v_flex().children(nodes));

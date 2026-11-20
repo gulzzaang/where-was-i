@@ -48,11 +48,28 @@ def to_trash(path):
     return None
 
 
+def check():
+    """설치 전 점검: herdr 앱 · 파이썬 · Claude Code."""
+    ok = True
+    if not os.path.isdir(APP) or shutil.which("herdr-app") is None:
+        print("✗ herdr 앱이 없거나 herdr-app 명령이 PATH 에 없음 — herdr 앱을 먼저 깔고 한 번 열어 주세요")
+        ok = False
+    if sys.version_info < (3, 9):
+        print("✗ python3 3.9 이상이 필요함")
+        ok = False
+    v = subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout.strip() if shutil.which("claude") else ""
+    print("· Claude Code:", v or "못 찾음(Codex 만 써도 됨)")
+    if not ok:
+        sys.exit(1)
+
+
 def install():
+    check()
     os.makedirs(MOD_DST, exist_ok=True)
-    for f in ("main.js", "mod.json"):
-        shutil.copy(os.path.join(MOD_SRC, f), os.path.join(MOD_DST, f))
-    print("칸 복사:", MOD_DST)
+    shutil.copy(os.path.join(MOD_SRC, "mod.json"), os.path.join(MOD_DST, "mod.json"))
+    js = open(os.path.join(MOD_SRC, "main.js")).read().replace("__WWI_PMAP__", os.path.join(REPO, "pmap.py"))
+    open(os.path.join(MOD_DST, "main.js"), "w").write(js)
+    print("칸 복사:", MOD_DST, "(기록 읽기:", os.path.join(REPO, "pmap.py") + ")")
     if not os.path.exists(LAYOUT):
         app("do", "layout.clone", "--name", "main", "--as", "main-progress")
         for _ in range(20):

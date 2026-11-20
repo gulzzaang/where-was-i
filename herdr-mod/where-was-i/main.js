@@ -5,7 +5,9 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { exec, focused, theme, home, checking, agents, nextCommand, layout } from "herdr";
 
-const SCRIPT = () => `${home()}/Documents/where-was-i/pmap.py`;
+// 설치(scripts/herdr_setup.py install)가 아래 자리에 이 저장소의 pmap.py 경로를 적어 넣는다
+const SCRIPT_PATH = "__WWI_PMAP__";
+const SCRIPT = () => (SCRIPT_PATH.startsWith("__") ? `${home()}/Documents/where-was-i/pmap.py` : SCRIPT_PATH);
 const ICON = (n) => `mods/workspace-chrome/${n}.svg`;
 // 레이아웃에서 이 칸이 숨겨져 있으면 기록을 읽지 않는다(숨겨도 칸 코드는 살아 있어서)
 const panelHidden = () => {

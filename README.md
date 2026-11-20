@@ -4,6 +4,23 @@ Claude Code(와 Codex) 세션이 **무엇을 지시받아 어떻게, 어디까�
 
 프로토타입이다. 설계서는 개인 옵시디언 볼트 `20_Projects/where was i/설계/설계서.md` 에 있다.
 
+## 팀원이 처음 깔 때
+
+준비물: herdr 앱(한 번 열어 둔 상태, `herdr-app` 명령이 PATH 에 있음), python3 3.9 이상(맥 기본 것으로 됨), Claude Code 또는 Codex.
+
+```bash
+git clone <저장소 주소> ~/where-was-i        # 어느 폴더든 된다
+cd ~/where-was-i
+python3 scripts/herdr_setup.py install
+```
+
+그다음 herdr 에서 **⌘⌥I** 를 누르면 오른쪽에 칸이 나온다. AI 에게 「where was i 깔아 줘」라고 해도 된다(이 README 를 보고 위를 따라 한다).
+
+**알아 둘 것**
+- 이 맥 안의 기록 파일만 읽는다. AI 를 부르지 않고(토큰 0), 바깥으로 보내는 것도 없다.
+- 프로토타입이다. Claude Code 내부 기록 모양을 읽어서, Claude Code 판이 오르면 깨질 수 있다. 단계 칸은 기록 흔적으로 짐작한 것이다.
+- herdr 가 없는 사람(Orca 등)용 브라우저 페이지는 아직 없다.
+
 ## 쓰는 법
 
 - **⌘⇧I**: 오른쪽 칸 숨김 · 보임. 숨겨 두면 기록을 읽지 않는다.

@@ -399,7 +399,7 @@ def turn_out(tn, live):
     last = clean_md(tn.get("last", ""), 600)
     sents = re.findall(r".+?(?:[.!?。]|니다|어요|해요)(?=\s|$)", last)
     acts = [past(a[1]) for a in (ev.get("acts") or [])][-4:]
-    return {"time": hm(tn["ts"]), "date": md(tn["ts"]), "said": tn["said"], "short": is_short(tn["said"]),
+    return {"ts": tn["ts"], "time": hm(tn["ts"]), "date": md(tn["ts"]), "said": tn["said"], "short": is_short(tn["said"]),
             "kind": tn.get("kind", ""), "asked": tn.get("asked", ""), "first": tn.get("first", ""),
             "last": short(" ".join(sents[:2]) if sents else last, 200), "last_time": hm(tn.get("last_ts")),
             "helpers": tn.get("helpers", []), "files": ev.get("files", []), "commits": ev.get("commits", 0),
@@ -670,6 +670,7 @@ def build_map(sid, tr):
         total = len(cards)
         done = sum(1 for c in cards if c["state"] == "done")
         out_phases.append({
+            "start_ts": ph["start"] or ph["items"][0]["start"],
             "name": ph["name"], "date": md(ph["start"] or ph["items"][0]["start"]),
             "goal": ph["goal"], "src": ph["src"], "total": total, "done": done,
             "state": "working" if any(c["running"] for c in cards) else "done",
@@ -701,13 +702,35 @@ def build_map(sid, tr):
         "phases": out_phases,
         "built": datetime.now(KST).strftime("%H:%M:%S"),
         "turns": [turn_out(tn, False) for tn in (st.get("turns") or [])],
-        "direct": {"prompt": first_sentence(last_prompt, 90), "since": hm(last_prompt_ts), "since_ts": last_prompt_ts,
+        "direct": {"prompt": (first_sentence(last_prompt, 90) if not is_short(last_prompt) or not (st.get("turns") or [{}])[-1].get("asked")
+                              else "「" + last_prompt.strip()[:20] + "」 → " + short((st.get("turns") or [{}])[-1].get("asked", ""), 120)),
+                   "since": hm(last_prompt_ts), "since_ts": last_prompt_ts,
                    "ev": main_ev},
     }
 
 
 def cached_map(sid, tr):
     return build_map(sid, tr)
+
+
+def attach_turns(m):
+    """지시(차례)를 시각으로 덩어리에 나눠 붙인다. 첫 덩어리 앞의 지시는 첫 덩어리로."""
+    phases, turns = m.get("phases") or [], m.get("turns") or []
+    if not phases:
+        if turns:
+            m["phases"] = [{"name": "지시", "start_ts": None, "date": turns[0]["date"], "goal": "", "src": "", "total": 0,
+                            "done": 0, "state": "working" if m.get("status") == "working" else "done", "cards": [], "turns": turns}]
+        return
+    starts = [kst(p.get("start_ts")) for p in phases]
+    for p in phases:
+        p["turns"] = []
+    for tn in turns:
+        t = kst(tn.get("ts"))
+        idx = 0
+        for i, st_ in enumerate(starts):
+            if st_ and t and st_ <= t:
+                idx = i
+        phases[idx]["turns"].append(tn)
 
 
 def overlay_live(m, live):
@@ -738,7 +761,7 @@ def overlay_live(m, live):
                          "time": f'{d.get("since", "")} ~', "cells": cells, "now": ev.get("now") or "생각하는 중", "said": ""}]}
     m["now"] = [{"name": "세션이 직접", "now": ev.get("now") or "생각하는 중", "mins": mins}]
     if not m["phases"]:
-        m["phases"].append({"name": "지금", "date": md(d.get("since_ts")), "goal": "", "src": "", "total": 0, "done": 0, "state": "working", "cards": []})
+        m["phases"].append({"name": "지금", "start_ts": d.get("since_ts"), "date": md(d.get("since_ts")), "goal": "", "src": "", "total": 0, "done": 0, "state": "working", "cards": []})
     ph = m["phases"][-1]
     ph["cards"].append(card)
     ph["total"] += 1
@@ -873,7 +896,7 @@ def build_codex_map(path, alive):
     started = kst(first_ts)
     cturns = []
     for tn, cd in zip(turns, cards):
-        cturns.append({"time": hm(tn["start"]), "date": md(tn["start"]), "said": tn["prompt"][:400], "short": is_short(tn["prompt"]),
+        cturns.append({"ts": tn["start"], "time": hm(tn["start"]), "date": md(tn["start"]), "said": tn["prompt"][:400], "short": is_short(tn["prompt"]),
                        "kind": "", "asked": tn.get("asked", ""), "first": tn.get("first", ""), "last": cd["done_text"],
                        "last_time": hm(tn["end"]), "helpers": [], "files": [], "commits": sum(1 for a in tn["acts"] if a[1] == "커밋"),
                        "tests": "실패" if tn["fail"] and not tn["pass"] else ("통과" if tn["pass"] else ""),
@@ -927,11 +950,14 @@ def main(argv):
     if s.get("agent") == "codex" or str(s.get("session", "")).startswith("codex:") or "--codex-file" in argv:
         path = argv[argv.index("--codex-file") + 1] if "--codex-file" in argv else s["transcript"]
         m = build_codex_map(path, SESSION_ALIVE and "--codex-file" not in argv)
+        attach_turns(m)
         m.update(name=s.get("name") or "", named=False, terminal=s.get("terminal"), cwd=s.get("cwd"))
         print(json.dumps(m, ensure_ascii=False))
         return 0
     m = cached_map(s["session"], s["transcript"])
     overlay_live(m, s.get("status") or "")
+    attach_turns(m)
+    m.pop("turns", None)
     m.update(name=s.get("name") or "", named=s.get("named"), terminal=s.get("terminal"), cwd=s.get("cwd"))
     print(json.dumps(m, ensure_ascii=False))
     return 0

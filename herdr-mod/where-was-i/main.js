@@ -36,15 +36,17 @@ export default class WhereWasI extends View {
     this.phase = null;
     this.open = {};
     this.busy = false;
-    this.view = "map";     // "map" 지도 · "turns" 지시 · 한 일
-    this.turnLimit = 30;
+    this.turnsOpen = {};   // 덩어리마다 「지시 · 한 일」 펼침
+    this.turnOpen = {};    // 지시 카드 하나 전체 보기
     if (checking()) return;
-    // herdr 명령: where-was-i.map · where-was-i.turns · where-was-i.toggle (단축키로도 쓸 수 있다)
+    // herdr 명령: where-was-i.toggle — 지금 단계의 「지시 · 한 일」 펼치기 · 접기(단축키로도 쓸 수 있다)
     cx.spawn(async (cx) => {
       for (;;) {
         const c = await nextCommand();
-        if (c === "map" || c === "turns") this.view = c;
-        else if (c === "toggle") this.view = this.view === "map" ? "turns" : "map";
+        if (c === "toggle" && this.data) {
+          const i = this.phase ?? Math.max(0, (this.data.phases || []).length - 1);
+          this.turnsOpen[i] = !this.turnsOpen[i];
+        }
         cx.notify();
       }
     });
@@ -325,70 +327,47 @@ export default class WhereWasI extends View {
     return v_flex().children(kids);
   }
 
-  tabs(d, t) {
-    const c = palette(t);
-    const tab = (id, label) => {
-      const on = this.view === id;
-      return div().id(`tab-${id}`).px(10).py(4).rounded(6).text_size(12)
-        .text_color(on ? t.foreground : t.muted).when(on, (x) => x.bg(t.raised).font_semibold())
-        .hover((x) => x.bg(t.raised))
-        .on_click((_e, cx) => { this.view = id; cx.notify(); })
-        .child(label);
-    };
-    return h_flex().gap(4).px(14).py(8).border_b(1).border_color(t.border).children([
-      tab("map", "지도"),
-      tab("turns", `지시 · 한 일 ${(d.turns || []).length}`),
-    ]);
-  }
-
   chip(text, t, color) {
     return div().px(6).py(1).rounded(5).bg(t.raised).text_size(11).text_color(color || t.muted).child(text);
   }
 
-  turnCard(tn, i, t) {
+  turnCard(tn, key, t) {
     const c = palette(t);
     const working = tn.state === "working";
+    const full = !!this.turnOpen[key];
+    const cut = (x, n) => (!x ? "" : full || x.length <= n ? x : x.slice(0, n - 1) + "…");
+    const firstSent = (x) => { const m = String(x || "").match(/^.+?(?:[.!?。]|니다|어요|해요)(?=\s|$)/); return m ? m[0] : String(x || ""); };
     const rows = [];
     rows.push(h_flex().items_center().gap(7).children([
-      this.mark(working ? "working" : "done", t, 12),
-      div().text_size(11).text_color(t.dim).child(`${tn.date} ${tn.time}`),
-      div().flex_1(),
-      tn.kind === "pick" ? this.chip("선택 상자 답", t, c.work) : div(),
+      this.mark(working ? "working" : "done", t, 11),
+      div().text_size(11).text_color(t.dim).child(tn.time),
+      div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).when(tn.short, (x) => x.font_semibold())
+        .child(`「${cut(tn.said, full ? 999 : 60)}」`),
+      tn.kind === "pick" ? this.chip("선택", t, c.work) : div(),
     ]));
-    rows.push(div().text_size(13).text_color(t.foreground).when(tn.short, (x) => x.font_semibold())
-      .child(`「${tn.said.length > 180 ? tn.said.slice(0, 179) + "…" : tn.said}」`));
+    if (full && tn.said.length > 60) rows.push(div().text_size(12).text_color(t.foreground).child(tn.said));
     if (tn.asked && (tn.short || tn.kind === "pick")) {
-      rows.push(v_flex().gap(2).p(7).rounded(7).bg(t.raised).children([
-        this.label("이 답이 가리킨 것 · 바로 앞에 AI가 물은 것", t),
-        div().text_size(12).text_color(t.foreground).child(tn.asked),
+      rows.push(v_flex().gap(1).p(6).rounded(6).bg(t.raised).children([
+        this.label("이 답이 가리킨 것", t),
+        div().text_size(11).text_color(t.foreground).child(cut(tn.asked, 120)),
       ]));
     }
-    if (tn.first) rows.push(v_flex().gap(1).children([this.label("AI가 알아들은 것", t), div().text_size(12).text_color(t.foreground).child(tn.first)]));
+    if (tn.first) rows.push(div().text_size(11).text_color(t.muted).child(`알아들음 · ${cut(tn.first, 90)}`));
     const chips = [];
-    if (tn.helpers && tn.helpers.length) chips.push(this.chip(`도우미 ${tn.helpers.length} · ${tn.helpers[0]}${tn.helpers.length > 1 ? " 외" : ""}`, t));
-    if (tn.files && tn.files.length) chips.push(this.chip(`파일 ${tn.files.length}개 · ${tn.files.slice(0, 2).join(", ")}${tn.files.length > 2 ? " 외" : ""}`, t));
+    if (tn.helpers && tn.helpers.length) chips.push(this.chip(`도우미 ${tn.helpers.length}`, t));
+    if (tn.files && tn.files.length) chips.push(this.chip(`파일 ${tn.files.length}`, t));
     if (tn.commits) chips.push(this.chip(`커밋 ${tn.commits}`, t, c.done));
     if (tn.tests) chips.push(this.chip(`시험 ${tn.tests}`, t, tn.tests === "통과" ? c.done : c.ask));
-    if (!chips.length && tn.acts && tn.acts.length) chips.push(this.chip(tn.acts.join(" → "), t));
-    if (chips.length) rows.push(v_flex().gap(3).children([this.label("한 일", t), h_flex().flex_wrap().gap(4).children(chips)]));
-    if (working) rows.push(div().text_size(12).text_color(c.work).child("지금 이 지시를 하는 중"));
-    else if (tn.last) rows.push(v_flex().gap(1).children([this.label(`끝에 한 말${tn.last_time ? " · " + tn.last_time : ""}`, t), div().text_size(12).text_color(t.muted).child(tn.last)]));
-    return v_flex().id(`turn-${i}`).gap(6).px(10).py(9).rounded(9)
-      .bg(working ? t.background : t.surface).border(working ? 2 : 1).border_color(working ? c.work : t.border)
+    if (chips.length) rows.push(h_flex().flex_wrap().gap(4).children(chips));
+    if (full && tn.helpers && tn.helpers.length) rows.push(div().text_size(11).text_color(t.muted).child(`도우미 · ${tn.helpers.join(" · ")}`));
+    if (full && tn.files && tn.files.length) rows.push(div().text_size(11).text_color(t.muted).child(`고친 파일 · ${tn.files.join(", ")}`));
+    if (working) rows.push(div().text_size(11).text_color(c.work).child("지금 이 지시를 하는 중"));
+    else if (tn.last) rows.push(div().text_size(11).text_color(t.foreground).child(`끝에 한 말 · ${full ? tn.last : firstSent(tn.last)}`));
+    return v_flex().id(`turn-${key}`).gap(4).px(9).py(7).rounded(8)
+      .bg(working ? t.background : t.surface).border(1).border_color(working ? c.work : t.border)
+      .hover((x) => x.bg(t.raised))
+      .on_click((_e, cx) => { this.turnOpen[key] = !full; cx.notify(); })
       .children(rows);
-  }
-
-  turnsView(d, t) {
-    const all = (d.turns || []).slice().reverse();
-    const shown = all.slice(0, this.turnLimit);
-    const kids = shown.map((tn, i) => this.turnCard(tn, i, t));
-    if (all.length > shown.length) {
-      kids.push(div().id("more-turns").py(8).text_size(12).text_color(palette(t).work)
-        .on_click((_e, cx) => { this.turnLimit += 30; cx.notify(); })
-        .child(`이전 지시 더 보기 (${all.length - shown.length}개 남음)`));
-    }
-    if (!kids.length) kids.push(div().text_size(12).text_color(t.dim).child("아직 지시 기록이 없어요."));
-    return v_flex().px(14).py(12).gap(8).children(kids);
   }
 
   connector(active, t) {
@@ -420,6 +399,22 @@ export default class WhereWasI extends View {
         ]),
         p.goal ? div().text_size(12).text_color(t.muted).child(p.goal) : div(),
       ]));
+      const turns = p.turns || [];
+      if (turns.length) {
+        const open = !!this.turnsOpen[idx];
+        parts.push(v_flex().gap(6).children([
+          h_flex().id(`turns-${idx}`).items_center().gap(6).px(8).py(6).rounded(7).border(1).border_color(t.border)
+            .hover((x) => x.bg(t.raised))
+            .on_click((_e, cx) => { this.turnsOpen[idx] = !open; cx.notify(); })
+            .children([
+              svg(ICON(open ? "chevron-down" : "chevron-right")).size(12).text_color(t.muted),
+              div().text_size(12).font_semibold().text_color(t.foreground).child(`이 단계의 지시 · 한 일 ${turns.length}개`),
+              div().flex_1(),
+              div().text_size(11).text_color(t.dim).child(open ? "접기" : `마지막 「${turns[turns.length - 1].said.slice(0, 14)}${turns[turns.length - 1].said.length > 14 ? "…" : ""}」`),
+            ]),
+          open ? v_flex().gap(5).children(turns.map((tn, j) => this.turnCard(tn, `${idx}-${j}`, t))) : div(),
+        ]));
+      }
       const nodes = [];
       p.cards.forEach((k, i) => {
         if (i > 0) nodes.push(this.connector(k.state === "working", t));
@@ -430,13 +425,10 @@ export default class WhereWasI extends View {
     return root.children([
       this.header(d, p, t, cx),
       this.picking ? this.picker(t, cx) : div(),
-      this.tabs(d, t),
-      this.view === "turns"
-        ? v_flex().id("pm-turns").flex_1().min_h(0).overflow_y_scrollbar().child(this.turnsView(d, t))
-        : v_flex().id("pm-body").flex_1().min_h(0).overflow_y_scrollbar().children([
-            this.summary(d, p, t),
-            v_flex().px(14).py(12).gap(12).children(parts),
-          ]),
+      v_flex().id("pm-body").flex_1().min_h(0).overflow_y_scrollbar().children([
+        this.summary(d, p, t),
+        v_flex().px(14).py(12).gap(12).children(parts),
+      ]),
       div().px(14).py(6).border_t(1).border_color(t.border).text_size(10).text_color(t.dim)
         .child(`대화 기록에서 읽음 · ${d.built}${this.busy ? " · 다시 읽는 중" : ""}`),
     ]);

@@ -259,8 +259,8 @@ export default class WhereWasI extends View {
         div().text_size(10).text_color(t.dim).child(h.time),
       ]),
       h_flex().items_center().gap(5).children([
-        image("icons/claude.svg").size(11),
-        div().text_size(11).text_color(t.muted).child(`${h.model || "Claude"} · ${h.kind}`),
+        image(h.kind === "Codex" ? "icons/codex.svg" : "icons/claude.svg").size(11),
+        div().text_size(11).text_color(t.muted).child(h.kind === "Codex" ? `Codex · ${h.model}` : `${h.model || "Claude"} · ${h.kind}`),
       ]),
       h.job ? div().text_size(11).text_color(t.muted).child(`맡은 일 · ${h.job}`) : div(),
       h.report ? div().text_size(11).text_color(t.muted).child(`보고 · ${h.report}`) : div(),
@@ -286,8 +286,8 @@ export default class WhereWasI extends View {
     const parts = [top];
     if (working) {
       parts.push(h_flex().items_center().gap(5).pl(20).children([
-        h0.kind === "세션" ? svg(ICON("terminal")).size(11).text_color(t.muted) : image("icons/claude.svg").size(11),
-        div().text_size(11).text_color(t.muted).child(h0.kind === "세션" ? "세션이 직접" : `${h0.model || "Claude"} · ${h0.kind || ""}${k.helpers.length > 1 ? ` 외 ${k.helpers.length - 1}` : ""}`),
+        h0.kind === "세션" ? svg(ICON("terminal")).size(11).text_color(t.muted) : image(h0.kind === "Codex" ? "icons/codex.svg" : "icons/claude.svg").size(11),
+        div().text_size(11).text_color(t.muted).child(h0.kind === "세션" ? "세션이 직접" : h0.kind === "Codex" ? `Codex · ${h0.model}` : `${h0.model || "Claude"} · ${h0.kind || ""}${k.helpers.length > 1 ? ` 외 ${k.helpers.length - 1}` : ""}`),
       ]));
       parts.push(div().h(1).bg(t.border).my(2));
       const nowH = k.helpers.find((x) => x.state === "working") || h0;

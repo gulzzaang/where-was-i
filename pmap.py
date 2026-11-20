@@ -158,6 +158,10 @@ def list_sessions():
             "updated": (tr and os.path.getmtime(tr)) or (d.get("updatedAt") or 0) / 1000,
             "transcript": tr,
         })
+    for c in codex_procs():
+        out.append({"session": "codex:" + os.path.basename(c["rollout"]), "name": "", "named": False,
+                    "status": "", "cwd": "", "terminal": c["terminal"], "agent": "codex",
+                    "updated": os.path.getmtime(c["rollout"]), "transcript": c["rollout"]})
     out.sort(key=lambda s: -(s["updated"] or 0))
     return out
 
@@ -635,6 +639,144 @@ def overlay_live(m, live):
     ph["state"] = "working"
 
 
+# ── Codex ─────────────────────────────────────────────────
+# Codex 기록: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
+# 요청 하나 = task_started … task_complete(또는 turn_aborted). 도우미는 없다.
+
+CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
+
+
+def codex_procs():
+    """떠 있는 codex 프로세스와 그 기록 파일(열어 둔 rollout)."""
+    out = []
+    try:
+        ps = subprocess.run(["ps", "-axo", "pid=,comm="], capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return out
+    for line in ps.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2 or os.path.basename(parts[1]) != "codex":
+            continue
+        pid = parts[0]
+        roll = None
+        try:
+            lf = subprocess.run(["lsof", "-p", pid, "-Fn"], capture_output=True, text=True, timeout=3).stdout
+            hits = [l[1:] for l in lf.splitlines() if l.startswith("n") and "/.codex/sessions/" in l and l.endswith(".jsonl")]
+            roll = hits[-1] if hits else None
+        except Exception:
+            pass
+        if roll:
+            out.append({"pid": pid, "rollout": roll, "terminal": terminal_of(pid)})
+    return out
+
+
+def codex_cmd(inp):
+    m = re.search(r'"cmd"\s*:\s*"((?:[^"\\]|\\.)*)"', str(inp or ""))
+    if m:
+        try:
+            return json.loads('"' + m.group(1) + '"')
+        except Exception:
+            return m.group(1)
+    return str(inp or "")[:200]
+
+
+def codex_act(cmd):
+    c = cmd.strip()
+    if "apply_patch" in c or re.search(r"\b(cat\s*>|tee |sed -i|perl -pi)", c):
+        return "파일 고침"
+    if "git commit" in c:
+        return "커밋"
+    if TEST_CMD.search(c):
+        return "시험 돌림"
+    if re.match(r"(sed -n|cat |rg |grep |ls|find |head |tail |nl )", c):
+        return "코드 읽음"
+    return "명령 돌림"
+
+
+def build_codex_map(path, alive):
+    turns, model, sid, first_ts, last_ts = [], "", "", None, None
+    cur, pending = None, {}
+    words, words_ts = "", None
+    for d in iter_jsonl(path):
+        ts = d.get("timestamp")
+        if ts:
+            first_ts = first_ts or ts
+            last_ts = ts
+        t, p = d.get("type"), d.get("payload") or {}
+        pt = p.get("type")
+        if t == "session_meta":
+            sid = p.get("id") or sid
+        elif t == "event_msg" and pt == "thread_settings_applied":
+            model = ((p.get("thread_settings") or {}).get("model")) or model
+        elif t == "event_msg" and pt == "task_started":
+            cur = {"start": ts, "end": None, "prompt": "", "acts": [], "answer": "", "state": "working",
+                   "fail": None, "pass": None}
+            turns.append(cur)
+        elif t == "event_msg" and pt == "item_completed" and cur is not None:
+            it = p.get("item") or {}
+            if it.get("type") == "UserMessage" and not cur["prompt"]:
+                cur["prompt"] = text_of(it.get("content"))
+        elif t == "response_item" and pt == "custom_tool_call" and cur is not None:
+            cmd = codex_cmd(p.get("input"))
+            act = codex_act(cmd)
+            pending[p.get("call_id")] = act
+            if not cur["acts"] or cur["acts"][-1][1] != act:
+                cur["acts"].append([ts, act])
+        elif t == "response_item" and pt == "custom_tool_call_output" and cur is not None:
+            act = pending.pop(p.get("call_id"), "")
+            if act == "시험 돌림":
+                out = text_of(p.get("output"))
+                if FAIL_OUT.search(out):
+                    cur["fail"] = cur["fail"] or ts
+                elif PASS_OUT.search(out):
+                    cur["pass"] = ts
+        elif t == "response_item" and pt == "message" and p.get("role") == "assistant":
+            txt = text_of(p.get("content"))
+            if txt.strip() and (hangul(txt) or not words):
+                words, words_ts = txt[:1200], ts
+        elif t == "event_msg" and pt in ("task_complete", "turn_aborted") and cur is not None:
+            cur["end"] = ts
+            cur["state"] = "done" if pt == "task_complete" else "aborted"
+            cur["answer"] = str(p.get("last_agent_message") or "")[:1500]
+            cur = None
+    mname = model or "Codex"
+    cards = []
+    for i, tn in enumerate(turns):
+        running = tn["state"] == "working" and alive
+        acts = tn["acts"][-6:]
+        if running:
+            cells = [[past(a[1]), "done", hm(a[0]), "기록"] for a in acts[:-1]] + ([[acts[-1][1].replace("고침", "고치는 중").replace("돌림", "돌리는 중").replace("읽음", "읽는 중"), "working", hm(acts[-1][0]), "기록"]] if acts else [["생각하는 중", "working", "", "기록"]])
+        else:
+            cells = [[a[1], "done", hm(a[0]), "기록"] for a in acts] or [["답", "done", hm(tn["end"]), "기록"]]
+        ans = clean_md(tn["answer"], 600)
+        sents = re.findall(r".+?(?:[.!?。]|니다|어요|해요)(?=\s|$)", ans)
+        state = "working" if running else "done"
+        title = first_sentence(tn["prompt"], 70) or f"요청 {i + 1}"
+        now = (cells[-1][0] if running else ("멈춤(중단)" if tn["state"] == "aborted" else "끝"))
+        cards.append({
+            "key": None, "title": title, "state": state,
+            "time": f'{hm(tn["start"])} ~ {"" if running else hm(tn["end"])}', "cells": cells,
+            "done_text": short(" ".join(sents[:2]) if sents else ans, 150), "after": ans,
+            "helpers": [{"kind": "Codex", "name": mname, "job": first_sentence(tn["prompt"], 150), "model": mname,
+                         "report": "", "state": state, "time": f'{hm(tn["start"])} ~', "cells": cells,
+                         "now": now, "said": ""}],
+        })
+    working = [c for c in cards if c["state"] == "working"]
+    started = kst(first_ts)
+    return {
+        "session": "codex:" + (sid or os.path.basename(path)), "transcript": path, "agent": "codex",
+        "started": md(first_ts), "days": (datetime.now(KST).date() - started.date()).days + 1 if started else 0,
+        "helpers": 0, "status": "working" if working else "idle", "asked": None,
+        "last_words": first_sentence(words, 200), "last_words_at": hm(words_ts),
+        "now": [{"name": "Codex", "now": working[-1]["cells"][-1][0],
+                 "mins": int((datetime.now(KST) - kst(turns[-1]["start"])).total_seconds() // 60) if kst(turns[-1]["start"]) else 0}] if working else [],
+        "phases": [{"name": f"Codex · {mname}", "date": md(first_ts), "goal": "", "src": "", "total": len(cards),
+                    "done": sum(1 for c in cards if c["state"] == "done"), "state": "working" if working else "done",
+                    "cards": cards}] if cards else [],
+        "built": datetime.now(KST).strftime("%H:%M:%S"),
+    }
+
+
 def main(argv):
     if len(argv) < 2 or argv[1] not in ("list", "map"):
         print(__doc__)
@@ -648,7 +790,7 @@ def main(argv):
             pass
     sessions = list_sessions()
     if argv[1] == "list":
-        print(json.dumps([{k: s[k] for k in ("session", "name", "named", "status", "terminal", "updated", "cwd")}
+        print(json.dumps([{k: s.get(k) for k in ("session", "name", "named", "status", "terminal", "updated", "cwd", "agent")}
                           for s in sessions], ensure_ascii=False))
         return 0
     sid = term = None
@@ -657,6 +799,8 @@ def main(argv):
     if "--terminal" in argv:
         term = argv[argv.index("--terminal") + 1]
     s = next((x for x in sessions if (sid and x["session"] == sid) or (term and x["terminal"] == term)), None)
+    if "--codex-file" in argv and not s:
+        s = {"session": "codex:file", "name": "", "terminal": None, "transcript": argv[argv.index("--codex-file") + 1], "cwd": "", "agent": "codex"}
     if not s and sid:
         s = {"session": sid, "name": "", "terminal": None, "transcript": transcript_of(sid), "cwd": "", "named": False}
     if not s or not s.get("transcript"):
@@ -664,6 +808,12 @@ def main(argv):
         return 0
     global SESSION_ALIVE
     SESSION_ALIVE = "status" in s
+    if s.get("agent") == "codex" or str(s.get("session", "")).startswith("codex:") or "--codex-file" in argv:
+        path = argv[argv.index("--codex-file") + 1] if "--codex-file" in argv else s["transcript"]
+        m = build_codex_map(path, SESSION_ALIVE and "--codex-file" not in argv)
+        m.update(name=s.get("name") or "", named=False, terminal=s.get("terminal"), cwd=s.get("cwd"))
+        print(json.dumps(m, ensure_ascii=False))
+        return 0
     m = cached_map(s["session"], s["transcript"])
     overlay_live(m, s.get("status") or "")
     m.update(name=s.get("name") or "", named=s.get("named"), terminal=s.get("terminal"), cwd=s.get("cwd"))

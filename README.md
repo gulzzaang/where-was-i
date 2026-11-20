@@ -6,7 +6,7 @@ Claude Code(와 Codex) 세션이 **무엇을 지시받아 어떻게, 어디까�
 
 ## 팀원이 처음 깔 때
 
-준비물: herdr 앱(한 번 열어 둔 상태, `herdr-app` 명령이 PATH 에 있음), python3 3.9 이상(맥 기본 것으로 됨), Claude Code 또는 Codex.
+준비물: herdr 앱(**설치할 때 창이 열려 있어야 함**, `herdr-app` 명령이 PATH 에 있음), python3 3.9 이상(맥 기본 것으로 됨), Claude Code(새 판 — `~/.claude/sessions` 를 남기는 판) 또는 Codex. 설치가 이것들을 먼저 점검하고, 끝나면 칸 검사 · 세션 찾기까지 스스로 확인한다.
 
 설치 자리는 **`~/.where-was-i`** 로 정해 둔다(어느 AI 든 이 자리만 보면 되게).
 

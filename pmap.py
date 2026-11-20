@@ -178,6 +178,7 @@ def list_sessions():
         sid = d.get("sessionId")
         tr = transcript_of(sid) if sid else None
         out.append({
+            "pid": str(pid),
             "session": sid,
             "name": d.get("name") or "",
             "named": d.get("nameSource") == "user",

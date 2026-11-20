@@ -43,6 +43,17 @@ def find(n, i):
     return None
 
 
+def parent_of(n, i):
+    if isinstance(n, dict):
+        for c in n.get("children", []):
+            if isinstance(c, dict) and c.get("id") == i:
+                return n
+            r = parent_of(c, i)
+            if r:
+                return r
+    return None
+
+
 def to_trash(path):
     if os.path.exists(path):
         dst = os.path.join(HOME, ".Trash", os.path.basename(path) + f"-{int(time.time())}")
@@ -62,6 +73,17 @@ def check():
         ok = False
     v = subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout.strip() if shutil.which("claude") else ""
     print("· Claude Code:", v or "못 찾음(Codex 만 써도 됨)")
+    sdir = os.path.join(HOME, ".claude", "sessions")
+    if v and not (os.path.isdir(sdir) and any(f.endswith(".json") for f in os.listdir(sdir))):
+        print("  ! ~/.claude/sessions 가 비어 있음 — 이 Claude Code 판은 세션 정보 파일을 안 남겨서 칸이 세션을 못 찾을 수 있다."
+              " `claude update` 로 새 판을 받고 Claude Code 를 한 번 열어 둔 뒤 다시 보세요")
+    if ok:
+        st = app("status")
+        if st.returncode != 0 or '"layout"' not in st.stdout:
+            print("✗ herdr 앱 창이 열려 있지 않음 — herdr 앱을 열어 둔 뒤 다시 설치해 주세요")
+            ok = False
+        else:
+            print("· herdr 앱:", (subprocess.run(["herdr-app", "--version"], capture_output=True, text=True).stdout or "").strip())
     if not ok:
         sys.exit(1)
 
@@ -75,13 +97,21 @@ def install():
     print("칸 복사:", MOD_DST, "(기록 읽기:", os.path.join(REPO, "pmap.py") + ")")
     if not os.path.exists(LAYOUT):
         app("do", "layout.clone", "--name", "main", "--as", "main-progress")
-        for _ in range(20):
+        for _ in range(30):
             if os.path.exists(LAYOUT):
                 break
             time.sleep(0.3)
+    if not os.path.exists(LAYOUT):
+        print("✗ 레이아웃 main-progress 를 만들지 못함 — herdr 앱에서 레이아웃 main 이 있는지 보고 다시 설치해 주세요")
+        sys.exit(1)
     d = json.load(open(LAYOUT))
     if not find(d, "where-was-i"):
-        find(d, "work-body")["children"].append(BLOCK)
+        # 보통은 가운데 줄(work-body) 오른쪽. herdr 판이 달라 그 이름이 없으면 터미널 블록(main)이 든 줄 오른쪽.
+        host = find(d, "work-body") or parent_of(d, "main")
+        if not host:
+            print("✗ 이 herdr 판의 화면 배치에서 칸을 붙일 자리를 못 찾음 — 레이아웃 파일을 사람이 봐야 함:", LAYOUT)
+            sys.exit(1)
+        host.setdefault("children", []).append(BLOCK)
         json.dump(d, open(LAYOUT, "w"), ensure_ascii=False, indent=1)
     print("레이아웃:", LAYOUT)
     k = json.load(open(KEYS)) if os.path.exists(KEYS) else {}
@@ -94,6 +124,15 @@ def install():
         k[sec][key] = act
     json.dump(k, open(KEYS, "w"), ensure_ascii=False, indent=2)
     print("단축키: ⌘⇧I 칸 숨김 · 보임, ⌘⌥I 아예 켜기 · 끄기")
+    # 설치 뒤 스스로 확인
+    chk = app("check", MOD_DST)
+    print("· 칸 검사:", "통과" if chk.returncode == 0 else "실패 — " + (chk.stdout + chk.stderr).strip()[-300:])
+    try:
+        n = len(json.loads(subprocess.run([sys.executable, os.path.join(REPO, "pmap.py"), "list"], capture_output=True, text=True, timeout=60).stdout or "[]"))
+        print(f"· 지금 떠 있는 세션 {n}개 찾음" + ("" if n else " — Claude Code 를 herdr 안에서 하나 열면 칸에 나온다"))
+    except Exception as e:
+        print("· 세션 찾기 실패:", e)
+    print("끝. herdr 에서 ⌘⌥I 를 누르면 칸이 나온다.")
 
 
 def update():

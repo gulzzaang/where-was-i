@@ -629,6 +629,13 @@ def main(argv):
     if len(argv) < 2 or argv[1] not in ("list", "map"):
         print(__doc__)
         return 2
+    # 14일 넘게 안 쓴 읽기 기록은 지운다(쌓이지 않게)
+    for f in glob.glob(os.path.join(CACHE, "*.json")):
+        try:
+            if time.time() - os.path.getmtime(f) > 14 * 86400:
+                os.remove(f)
+        except OSError:
+            pass
     sessions = list_sessions()
     if argv[1] == "list":
         print(json.dumps([{k: s[k] for k in ("session", "name", "named", "status", "terminal", "updated", "cwd")}

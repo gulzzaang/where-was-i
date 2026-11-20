@@ -42,7 +42,12 @@ export default class WhereWasI extends View {
       const t = focused()?.terminal ?? null;
       if (!this.pick && t && t !== this.lastTerm) this.refresh(cx);
     });
-    cx.timer.every(5000, (cx) => this.refresh(cx));
+    this.tick = 0;
+    cx.timer.every(5000, (cx) => {
+      this.tick += 1;
+      const idle = this.data && this.data.status !== "working";
+      if (!idle || this.tick % 4 === 0) this.refresh(cx);
+    });
   }
 
   refresh(cx) {
@@ -54,6 +59,9 @@ export default class WhereWasI extends View {
     cx.spawn(async (cx) => {
       try {
         const r = await exec("python3", [SCRIPT(), ...args], { timeout: 60000 });
+        const raw = (r.stdout || "{}").replace(/"built": "[^"]*"/, "");
+        if (raw === this.lastRaw && t === this.lastTerm) { this.busy = false; return; }
+        this.lastRaw = raw;
         const d = JSON.parse(r.stdout || "{}");
         if (!this.pick && t !== this.lastTerm) { this.phase = null; this.open = {}; }
         if (!this.pick) this.lastTerm = t;
@@ -79,7 +87,7 @@ export default class WhereWasI extends View {
   // ── 작은 조각 ──
   mark(state, t, size = 13) {
     const c = palette(t);
-    if (state === "working") return svg(ICON("spinner")).size(size).flex_none().text_color(c.work).spin(900);
+    if (state === "working") return svg(ICON("spinner")).size(size).flex_none().text_color(c.work);
     if (state === "asking") return div().size(size).flex_none().rounded_full().bg(c.ask).text_color(t.background).text_size(size - 4).font_semibold().flex().items_center().justify_center().child("!");
     if (state === "done") return svg(ICON("circle-check")).size(size).flex_none().text_color(c.done);
     return div().size(size - 2).flex_none().rounded_full().border(1).border_dashed().border_color(t.dim);
@@ -91,7 +99,6 @@ export default class WhereWasI extends View {
     return h_flex().w_full().gap(3).children(list.map((s, i) => {
       const st = Array.isArray(s) ? s[1] : s;
       let el = div().id(`sg${i}`).flex_1().h(h).rounded(h).bg(st === "done" ? c.done : st === "working" ? c.work : c.todo);
-      if (st === "working") el = el.loop("opacity", { from: 0.45, to: 1, period: 1400 });
       return el;
     }));
   }
@@ -103,7 +110,6 @@ export default class WhereWasI extends View {
     return h_flex().w_full().gap(3).children(cells.map((s, i) => {
       const st = s[1];
       let bar = div().h(h).rounded(h).bg(st === "done" ? c.done : st === "working" ? c.work : c.todo);
-      if (st === "working") bar = bar.loop("opacity", { from: 0.45, to: 1, period: 1400 });
       return v_flex().id(`sb${i}`).flex_1().min_w(0).gap(2).children([
         bar,
         div().truncate().text_size(9).text_color(st === "working" ? c.work : st === "done" ? t.muted : t.dim)
@@ -146,7 +152,7 @@ export default class WhereWasI extends View {
     const pillColor = st === "working" ? c.work : st === "asking" ? c.ask : t.dim;
     const pillText = st === "working" ? "일하는 중" : st === "asking" ? "나를 기다림" : "쉬는 중";
     const pill = h_flex().items_center().gap(5).px(8).py(2).rounded(6).bg(t.raised)
-      .child(st === "working" ? svg(ICON("spinner")).size(11).text_color(pillColor).spin(900) : div().size(7).rounded_full().bg(pillColor))
+      .child(st === "working" ? svg(ICON("spinner")).size(11).text_color(pillColor) : div().size(7).rounded_full().bg(pillColor))
       .child(div().text_size(12).font_semibold().text_color(pillColor).child(pillText));
     const segs = p ? p.cards.map((k) => k.state) : [];
     return v_flex().gap(8).px(14).pt(12).pb(12).border_b(1).border_color(t.border).children([
@@ -170,7 +176,7 @@ export default class WhereWasI extends View {
         const nowH = w.helpers.find((x) => x.state === "working") || w.helpers[0] || {};
         const cur = (w.cells || []).find((x) => x[1] === "working");
         return h_flex().items_center().gap(6).children([
-          svg(ICON("spinner")).size(11).text_color(palette(t).work).spin(900),
+          svg(ICON("spinner")).size(11).text_color(palette(t).work),
           div().flex_1().min_w(0).truncate().text_size(12).text_color(palette(t).work)
             .child(`지금 · ${w.key ? w.key + " " : ""}${w.title}${cur ? " · " + cur[0] : ""}${nowH.now && (!cur || cur[0] !== nowH.now) ? " · " + nowH.now : ""}`),
         ]);
@@ -187,7 +193,7 @@ export default class WhereWasI extends View {
       this.label(`진행 ${working.length}`, t),
       working.length
         ? v_flex().gap(2).children(working.map((k) => h_flex().items_center().gap(6).children([
-            svg(ICON("spinner")).size(11).text_color(c.work).spin(900),
+            svg(ICON("spinner")).size(11).text_color(c.work),
             div().flex_1().min_w(0).truncate().text_size(13).text_color(t.foreground).child(k.title),
           ])))
         : div().text_size(13).text_color(t.muted).child("없음"),

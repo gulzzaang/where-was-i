@@ -9,7 +9,7 @@ Claude Code(와 Codex) 세션이 **무엇을 지시받아 어떻게, 어디까�
 준비물: herdr 앱(한 번 열어 둔 상태, `herdr-app` 명령이 PATH 에 있음), python3 3.9 이상(맥 기본 것으로 됨), Claude Code 또는 Codex.
 
 ```bash
-git clone <저장소 주소> ~/where-was-i        # 어느 폴더든 된다
+git clone https://github.com/gulzzaang/where-was-i.git ~/where-was-i   # 어느 폴더든 된다
 cd ~/where-was-i
 python3 scripts/herdr_setup.py install
 ```

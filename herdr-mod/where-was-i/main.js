@@ -171,69 +171,45 @@ export default class WhereWasI extends View {
     const st = d.status;
     const pillColor = st === "working" ? c.work : st === "asking" ? c.ask : t.dim;
     const pillText = st === "working" ? "일하는 중" : st === "asking" ? "나를 기다림" : "쉬는 중";
-    const pill = h_flex().items_center().gap(5).px(8).py(2).rounded(6).bg(t.raised)
+    const pill = h_flex().items_center().gap(5).px(7).py(1).rounded(6).bg(t.raised)
       .child(st === "working" ? svg(ICON("spinner")).size(11).text_color(pillColor) : div().size(7).rounded_full().bg(pillColor))
-      .child(div().text_size(12).font_semibold().text_color(pillColor).child(pillText));
+      .child(div().text_size(11).font_semibold().text_color(pillColor).child(pillText));
     const segs = p ? p.cards.map((k) => k.state) : [];
-    return v_flex().gap(8).px(14).pt(12).pb(12).border_b(1).border_color(t.border).children([
+    const w = p ? p.cards.find((k) => k.state === "working") : null;
+    const rows = [
       h_flex().items_center().gap(8).children([
         pill,
-        div().text_size(12).text_color(t.dim).child(`${d.days}일째`),
+        div().text_size(11).text_color(t.dim).child(`${d.days}일째 · 도우미 ${d.helpers}번`),
         div().flex_1(),
-        h_flex().id("pick").items_center().gap(3).px(6).py(2).rounded(6).hover((s) => s.bg(t.raised))
+        h_flex().id("pick").items_center().gap(3).px(6).py(1).rounded(6).hover((s) => s.bg(t.raised))
           .on_click((_e, cx) => { this.picking = !this.picking; if (this.picking) this.loadSessions(cx); cx.notify(); })
           .child(div().text_size(11).text_color(t.muted).child(this.pick ? "고른 세션" : `${d.terminal || ""} 따라가는 중`))
           .child(svg(ICON("chevron-down")).size(12).text_color(t.muted)),
       ]),
-      div().text_size(16).font_semibold().text_color(t.foreground).truncate().child(tabName(d.terminal) || d.name || "(이름 없는 세션)"),
-      p ? h_flex().items_center().gap(10).children([
-        div().flex_1().child(this.segs(segs, t, 6)),
-        div().text_size(12).text_color(t.muted).child(`${p.done} / ${p.total} 끝`),
-      ]) : div(),
-      (() => {
-        const w = p ? p.cards.find((k) => k.state === "working") : null;
-        if (!w) return div();
-        const nowH = w.helpers.find((x) => x.state === "working") || w.helpers[0] || {};
-        const cur = (w.cells || []).find((x) => x[1] === "working");
-        return h_flex().items_center().gap(6).children([
-          svg(ICON("spinner")).size(11).text_color(palette(t).work),
-          div().flex_1().min_w(0).truncate().text_size(12).text_color(palette(t).work)
-            .child(`지금 · ${w.key ? w.key + " " : ""}${w.title}${cur ? " · " + cur[0] : ""}${nowH.now && (!cur || cur[0] !== nowH.now) ? " · " + nowH.now : ""}`),
-        ]);
-      })(),
-    ]);
-  }
-
-  // ── 요약(Hide 오른쪽 칸처럼 이름표 + 내용) ──
-  summary(d, p, t) {
-    const c = palette(t);
-    const working = p ? p.cards.filter((k) => k.state === "working") : [];
-    const rows = [];
-    rows.push(v_flex().gap(3).children([
-      this.label(`진행 ${working.length}`, t),
-      working.length
-        ? v_flex().gap(2).children(working.map((k) => h_flex().items_center().gap(6).children([
-            svg(ICON("spinner")).size(11).text_color(c.work),
-            div().flex_1().min_w(0).truncate().text_size(13).text_color(t.foreground).child(k.title),
-          ])))
-        : div().text_size(13).text_color(t.muted).child("없음"),
-      d.now && d.now.length ? div().text_size(12).text_color(c.work).child(`지금 · ${d.now[0].now} · ${d.now[0].mins}분째`) : div(),
+      div().text_size(15).font_semibold().text_color(t.foreground).truncate().child(tabName(d.terminal) || d.name || "(이름 없는 세션)"),
+    ];
+    if (p) rows.push(h_flex().items_center().gap(10).children([
+      div().flex_1().child(this.segs(segs, t, 5)),
+      div().text_size(11).text_color(t.muted).child(`${p.done} / ${p.total} 끝`),
     ]));
-    rows.push(v_flex().gap(3).children([
-      this.label("나에게", t),
-      d.asked
-        ? h_flex().items_center().gap(6).children([this.mark("asking", t, 13), div().flex_1().min_w(0).text_size(13).text_color(c.ask).child(d.asked)])
-        : div().text_size(13).text_color(t.muted).child("물어본 것 없음"),
+    if (w) {
+      const nowH = w.helpers.find((x) => x.state === "working") || w.helpers[0] || {};
+      const cur = (w.cells || []).find((x) => x[1] === "working");
+      rows.push(h_flex().items_center().gap(6).children([
+        svg(ICON("spinner")).size(11).text_color(c.work),
+        div().flex_1().min_w(0).truncate().text_size(12).text_color(c.work)
+          .child(`지금 · ${w.key ? w.key + " " : ""}${w.title}${cur ? " · " + cur[0] : ""}${nowH.now && (!cur || cur[0] !== nowH.now) ? " · " + nowH.now : ""}`),
+      ]));
+    }
+    if (d.asked) rows.push(h_flex().items_start().gap(6).px(8).py(5).rounded(7).bg(t.raised).border(1).border_color(c.ask).children([
+      this.mark("asking", t, 12),
+      div().flex_1().min_w(0).text_size(12).text_color(c.ask).child(d.asked.length > 160 ? d.asked.slice(0, 159) + "…" : d.asked),
     ]));
-    rows.push(v_flex().gap(3).children([
-      this.label(`마지막 말 · ${d.last_words_at || ""}`, t),
-      div().text_size(13).text_color(t.foreground).child(d.last_words || "-"),
+    if (d.last_words) rows.push(h_flex().gap(6).children([
+      div().text_size(11).text_color(t.dim).child(`마지막 말 ${d.last_words_at || ""}`),
+      div().flex_1().min_w(0).truncate().text_size(11).text_color(t.muted).child(d.last_words),
     ]));
-    rows.push(v_flex().gap(3).children([
-      this.label("도우미", t),
-      div().text_size(13).text_color(t.foreground).child(`${(d.now || []).filter((n) => n.name !== "세션이 직접").length}명 일함 · 지금까지 ${d.helpers}번 · ${d.started} 시작`),
-    ]));
-    return v_flex().gap(12).px(14).py(12).border_b(1).border_color(t.border).children(rows);
+    return v_flex().gap(6).px(14).pt(10).pb(10).border_b(1).border_color(t.border).children(rows);
   }
 
   picker(t, cx) {
@@ -417,7 +393,7 @@ export default class WhereWasI extends View {
     if (p) {
       parts.push(v_flex().gap(3).children([
         h_flex().items_center().gap(8).children([
-          div().text_size(14).font_semibold().child(p.name),
+          div().text_size(16).font_semibold().child(p.name),
           div().text_size(11).text_color(t.dim).child(p.date),
         ]),
         p.goal ? div().text_size(12).text_color(t.muted).child(p.goal) : div(),
@@ -434,8 +410,7 @@ export default class WhereWasI extends View {
       this.header(d, p, t, cx),
       this.picking ? this.picker(t, cx) : div(),
       v_flex().id("pm-body").flex_1().min_h(0).overflow_y_scrollbar().children([
-        this.summary(d, p, t),
-        v_flex().px(14).py(12).gap(12).children(parts),
+        v_flex().px(14).pt(10).pb(12).gap(10).children(parts),
       ]),
       div().px(14).py(6).border_t(1).border_color(t.border).text_size(10).text_color(t.dim)
         .child(`대화 기록에서 읽음 · ${d.built}${this.busy ? " · 다시 읽는 중" : ""}`),

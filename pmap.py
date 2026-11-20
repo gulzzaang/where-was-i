@@ -491,7 +491,8 @@ def update_main(tr, st):
                     picks = re.findall(r'"([^"]{1,200})"="([^"]{1,300})"', r)
                     pick = " / ".join(a for _, a in picks) or short(r, 200)
                     pa = st.pop("pending_ask")
-                    open_turn(st, ts, pick, pa["q"], "pick")
+                    if picks or not r.lstrip().startswith(("The user doesn", "User rejected", "[Request interrupted")):
+                        open_turn(st, ts, pick, pa["q"], "pick")
         st["seg"] = scan_lines([d], st.get("seg"))
         if st.get("turns"):
             st["turns"][-1]["ev"] = scan_lines([d], st["turns"][-1].get("ev"))

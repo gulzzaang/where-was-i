@@ -3,10 +3,20 @@
 // 생김새는 Hide 의 미션 지도를 참고했다: 위 막대 · 요약 · 이어진 카드(끝 초록 체크, 일하는 중 파란 테두리와 도는 표시).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, focused, theme, home, checking, agents, nextCommand } from "herdr";
+import { exec, focused, theme, home, checking, agents, nextCommand, layout } from "herdr";
 
 const SCRIPT = () => `${home()}/Documents/where-was-i/pmap.py`;
 const ICON = (n) => `mods/workspace-chrome/${n}.svg`;
+// 레이아웃에서 이 칸이 숨겨져 있으면 기록을 읽지 않는다(숨겨도 칸 코드는 살아 있어서)
+const panelHidden = () => {
+  const find = (n) => {
+    if (!n || typeof n !== "object") return null;
+    if (n.id === "where-was-i") return n;
+    for (const c of n.children || []) { const r = find(c); if (r) return r; }
+    return null;
+  };
+  try { const node = find(layout()); return !!(node && node.hidden); } catch (e) { return false; }
+};
 // 세션 이름은 herdr 탭 이름(직접 지은 것) → 탭에 보이는 제목 차례
 const tabName = (term) => {
   const a = term && agents().find((x) => x.address === term);
@@ -64,7 +74,7 @@ export default class WhereWasI extends View {
   }
 
   refresh(cx) {
-    if (this.busy) return;
+    if (this.busy || panelHidden()) return;
     const t = focused()?.terminal ?? null;
     const args = this.pick ? ["map", "--session", this.pick] : (t ? ["map", "--terminal", t] : null);
     if (!args) return;

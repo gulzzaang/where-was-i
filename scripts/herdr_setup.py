@@ -2,7 +2,10 @@
 """where was i — herdr 칸 설치 · 지우기.
 
   python3 scripts/herdr_setup.py install    칸 복사 · 레이아웃(main-progress) · 단축키
+  python3 scripts/herdr_setup.py update     저장소를 새로 받고(git pull) 다시 설치
   python3 scripts/herdr_setup.py uninstall  위를 모두 걷는다(칸 · 레이아웃은 휴지통으로, 단축키는 우리 것만)
+
+정해 둔 설치 자리: ~/.where-was-i (git clone https://github.com/gulzzaang/where-was-i.git ~/.where-was-i)
 
 단축키
   ⌘⇧I  오른쪽 칸 숨김 · 보임 (숨기면 기록을 읽지 않는다)
@@ -93,6 +96,15 @@ def install():
     print("단축키: ⌘⇧I 칸 숨김 · 보임, ⌘⌥I 아예 켜기 · 끄기")
 
 
+def update():
+    r = subprocess.run(["git", "-C", REPO, "pull", "--ff-only"], capture_output=True, text=True)
+    print((r.stdout or r.stderr).strip() or "git pull 끝")
+    if r.returncode != 0:
+        print("✗ 새로 받기 실패 — 저장소에 고친 파일이 있는지 보세요")
+        sys.exit(1)
+    install()
+
+
 def uninstall():
     st = app("status").stdout
     if '"layout": "main-progress"' in st:
@@ -115,13 +127,15 @@ def uninstall():
     if os.path.isdir(CACHE):
         shutil.rmtree(CACHE)
         print("읽기 기록 지움:", CACHE)
-    print("저장소(~/Documents/where-was-i)는 그대로 둠")
+    print(f"저장소({REPO})는 그대로 둠 — 이것까지 지우려면 그 폴더를 휴지통으로")
 
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "install":
         install()
+    elif cmd == "update":
+        update()
     elif cmd == "uninstall":
         uninstall()
     else:

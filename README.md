@@ -8,13 +8,22 @@ Claude Code(와 Codex) 세션이 **무엇을 지시받아 어떻게, 어디까�
 
 준비물: herdr 앱(한 번 열어 둔 상태, `herdr-app` 명령이 PATH 에 있음), python3 3.9 이상(맥 기본 것으로 됨), Claude Code 또는 Codex.
 
+설치 자리는 **`~/.where-was-i`** 로 정해 둔다(어느 AI 든 이 자리만 보면 되게).
+
 ```bash
-git clone https://github.com/gulzzaang/where-was-i.git ~/where-was-i   # 어느 폴더든 된다
-cd ~/where-was-i
-python3 scripts/herdr_setup.py install
+git clone https://github.com/gulzzaang/where-was-i.git ~/.where-was-i
+python3 ~/.where-was-i/scripts/herdr_setup.py install
 ```
 
-그다음 herdr 에서 **⌘⌥I** 를 누르면 오른쪽에 칸이 나온다. AI 에게 「where was i 깔아 줘」라고 해도 된다(이 README 를 보고 위를 따라 한다).
+그다음 herdr 에서 **⌘⌥I** 를 누르면 오른쪽에 칸이 나온다. AI 에게 「where was i 설치해 줘」라고 해도 된다.
+
+| 할 일 | 명령 |
+|---|---|
+| 설치 | `git clone https://github.com/gulzzaang/where-was-i.git ~/.where-was-i && python3 ~/.where-was-i/scripts/herdr_setup.py install` |
+| 업데이트 | `python3 ~/.where-was-i/scripts/herdr_setup.py update` (새로 받고 다시 설치) |
+| 지우기 | `python3 ~/.where-was-i/scripts/herdr_setup.py uninstall` (저장소 폴더 `~/.where-was-i` 도 지우려면 그다음 휴지통으로) |
+
+설치하면 생기는 것: 저장소 `~/.where-was-i`, herdr 칸 `~/.config/herdr-app/mods/where-was-i`, 레이아웃 `~/.config/herdr-app/layouts/main-progress.json`, 단축키 3개(`~/.config/herdr-app/keys.json`, 바꾸기 전 `.bak-where-was-i` 백업), 읽기 기록 `~/.cache/where-was-i`.
 
 **알아 둘 것**
 - 이 맥 안의 기록 파일만 읽는다. AI 를 부르지 않고(토큰 0), 바깥으로 보내는 것도 없다.
@@ -31,10 +40,10 @@ python3 scripts/herdr_setup.py install
 
 ## AI 에게 시킬 때
 
-- **설치(또는 고친 칸 다시 깔기)**: `python3 scripts/herdr_setup.py install`
+- **설치(또는 고친 칸 다시 깔기)**: 위 표. 저장소가 이미 `~/.where-was-i` 에 있으면 `install` 만.
   - 칸을 `~/.config/herdr-app/mods/where-was-i` 로 복사하고, 없으면 레이아웃 `main-progress` 를 만들어 오른쪽에 칸을 붙이고, 위 단축키를 넣는다(`keys.json` 은 `.bak-where-was-i` 로 백업, 이미 다른 뜻으로 쓰는 키는 건너뜀).
   - 칸 코드를 고친 뒤 `herdr-app check herdr-mod/where-was-i` 를 먼저 통과시킨다.
-- **지우기**: `python3 scripts/herdr_setup.py uninstall`
+- **지우기**: `python3 ~/.where-was-i/scripts/herdr_setup.py uninstall`
   - 진행 지도 화면이면 기본 화면으로 돌리고, 우리가 넣은 단축키만 걷고(`keys.json` 백업), 칸 폴더와 레이아웃 복사본은 휴지통으로, 읽기 기록(`~/.cache/where-was-i`)은 지운다. 이 저장소는 그대로 둔다.
 - 화면 확인: `herdr-app shot <파일.png>`(화면 기록 권한 없이 herdr 창만 찍는다).
 

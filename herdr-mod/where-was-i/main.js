@@ -3,7 +3,7 @@
 // 생김새는 Hide 의 미션 지도를 참고했다: 위 막대 · 요약 · 이어진 카드(끝 초록 체크, 일하는 중 파란 테두리와 도는 표시).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, focused, theme, home, checking, agents } from "herdr";
+import { exec, focused, theme, home, checking, agents, nextCommand } from "herdr";
 
 const SCRIPT = () => `${home()}/Documents/where-was-i/pmap.py`;
 const ICON = (n) => `mods/workspace-chrome/${n}.svg`;
@@ -36,7 +36,18 @@ export default class WhereWasI extends View {
     this.phase = null;
     this.open = {};
     this.busy = false;
+    this.view = "map";     // "map" 지도 · "turns" 지시 · 한 일
+    this.turnLimit = 30;
     if (checking()) return;
+    // herdr 명령: where-was-i.map · where-was-i.turns · where-was-i.toggle (단축키로도 쓸 수 있다)
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (c === "map" || c === "turns") this.view = c;
+        else if (c === "toggle") this.view = this.view === "map" ? "turns" : "map";
+        cx.notify();
+      }
+    });
     this.refresh(cx);
     cx.timer.every(1500, (cx) => {
       const t = focused()?.terminal ?? null;
@@ -314,6 +325,72 @@ export default class WhereWasI extends View {
     return v_flex().children(kids);
   }
 
+  tabs(d, t) {
+    const c = palette(t);
+    const tab = (id, label) => {
+      const on = this.view === id;
+      return div().id(`tab-${id}`).px(10).py(4).rounded(6).text_size(12)
+        .text_color(on ? t.foreground : t.muted).when(on, (x) => x.bg(t.raised).font_semibold())
+        .hover((x) => x.bg(t.raised))
+        .on_click((_e, cx) => { this.view = id; cx.notify(); })
+        .child(label);
+    };
+    return h_flex().gap(4).px(14).py(8).border_b(1).border_color(t.border).children([
+      tab("map", "지도"),
+      tab("turns", `지시 · 한 일 ${(d.turns || []).length}`),
+    ]);
+  }
+
+  chip(text, t, color) {
+    return div().px(6).py(1).rounded(5).bg(t.raised).text_size(11).text_color(color || t.muted).child(text);
+  }
+
+  turnCard(tn, i, t) {
+    const c = palette(t);
+    const working = tn.state === "working";
+    const rows = [];
+    rows.push(h_flex().items_center().gap(7).children([
+      this.mark(working ? "working" : "done", t, 12),
+      div().text_size(11).text_color(t.dim).child(`${tn.date} ${tn.time}`),
+      div().flex_1(),
+      tn.kind === "pick" ? this.chip("선택 상자 답", t, c.work) : div(),
+    ]));
+    rows.push(div().text_size(13).text_color(t.foreground).when(tn.short, (x) => x.font_semibold())
+      .child(`「${tn.said.length > 180 ? tn.said.slice(0, 179) + "…" : tn.said}」`));
+    if (tn.asked && (tn.short || tn.kind === "pick")) {
+      rows.push(v_flex().gap(2).p(7).rounded(7).bg(t.raised).children([
+        this.label("이 답이 가리킨 것 · 바로 앞에 AI가 물은 것", t),
+        div().text_size(12).text_color(t.foreground).child(tn.asked),
+      ]));
+    }
+    if (tn.first) rows.push(v_flex().gap(1).children([this.label("AI가 알아들은 것", t), div().text_size(12).text_color(t.foreground).child(tn.first)]));
+    const chips = [];
+    if (tn.helpers && tn.helpers.length) chips.push(this.chip(`도우미 ${tn.helpers.length} · ${tn.helpers[0]}${tn.helpers.length > 1 ? " 외" : ""}`, t));
+    if (tn.files && tn.files.length) chips.push(this.chip(`파일 ${tn.files.length}개 · ${tn.files.slice(0, 2).join(", ")}${tn.files.length > 2 ? " 외" : ""}`, t));
+    if (tn.commits) chips.push(this.chip(`커밋 ${tn.commits}`, t, c.done));
+    if (tn.tests) chips.push(this.chip(`시험 ${tn.tests}`, t, tn.tests === "통과" ? c.done : c.ask));
+    if (!chips.length && tn.acts && tn.acts.length) chips.push(this.chip(tn.acts.join(" → "), t));
+    if (chips.length) rows.push(v_flex().gap(3).children([this.label("한 일", t), h_flex().flex_wrap().gap(4).children(chips)]));
+    if (working) rows.push(div().text_size(12).text_color(c.work).child("지금 이 지시를 하는 중"));
+    else if (tn.last) rows.push(v_flex().gap(1).children([this.label(`끝에 한 말${tn.last_time ? " · " + tn.last_time : ""}`, t), div().text_size(12).text_color(t.muted).child(tn.last)]));
+    return v_flex().id(`turn-${i}`).gap(6).px(10).py(9).rounded(9)
+      .bg(working ? t.background : t.surface).border(working ? 2 : 1).border_color(working ? c.work : t.border)
+      .children(rows);
+  }
+
+  turnsView(d, t) {
+    const all = (d.turns || []).slice().reverse();
+    const shown = all.slice(0, this.turnLimit);
+    const kids = shown.map((tn, i) => this.turnCard(tn, i, t));
+    if (all.length > shown.length) {
+      kids.push(div().id("more-turns").py(8).text_size(12).text_color(palette(t).work)
+        .on_click((_e, cx) => { this.turnLimit += 30; cx.notify(); })
+        .child(`이전 지시 더 보기 (${all.length - shown.length}개 남음)`));
+    }
+    if (!kids.length) kids.push(div().text_size(12).text_color(t.dim).child("아직 지시 기록이 없어요."));
+    return v_flex().px(14).py(12).gap(8).children(kids);
+  }
+
   connector(active, t) {
     const c = palette(t);
     return h_flex().justify_center().child(div().w(active ? 2 : 1).h(12).bg(active ? c.work : t.border));
@@ -353,10 +430,13 @@ export default class WhereWasI extends View {
     return root.children([
       this.header(d, p, t, cx),
       this.picking ? this.picker(t, cx) : div(),
-      v_flex().id("pm-body").flex_1().min_h(0).overflow_y_scrollbar().children([
-        this.summary(d, p, t),
-        v_flex().px(14).py(12).gap(12).children(parts),
-      ]),
+      this.tabs(d, t),
+      this.view === "turns"
+        ? v_flex().id("pm-turns").flex_1().min_h(0).overflow_y_scrollbar().child(this.turnsView(d, t))
+        : v_flex().id("pm-body").flex_1().min_h(0).overflow_y_scrollbar().children([
+            this.summary(d, p, t),
+            v_flex().px(14).py(12).gap(12).children(parts),
+          ]),
       div().px(14).py(6).border_t(1).border_color(t.border).text_size(10).text_color(t.dim)
         .child(`대화 기록에서 읽음 · ${d.built}${this.busy ? " · 다시 읽는 중" : ""}`),
     ]);

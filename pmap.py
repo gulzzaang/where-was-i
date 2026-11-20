@@ -61,6 +61,35 @@ def past(now):
             .replace("읽는 중", "읽음").replace("커밋하는 중", "커밋").replace("보고하고 끝냄", "보고"))
 
 
+SHORT_OK = re.compile(r"^(ㅇㅇ|ㄱㄱ|ㅇㅋ|ㄱ|응|ㅇ|네|예|그래|좋아|좋다|진행|고고|ok|오케이|넵|ㄴㄴ|아니|ㅇㅇ\s*ㄱㄱ)", re.I)
+
+
+def is_short(said):
+    t = str(said or "").strip()
+    return len(t) <= 15 or (len(t) <= 30 and bool(SHORT_OK.match(t)))
+
+
+def ask_context(txt):
+    """AI 글에서 마지막 물음과 그 둘레의 선택지를 꺼낸다."""
+    lines = [l.strip() for l in str(txt or "").splitlines() if l.strip()]
+    qi = None
+    for i in range(len(lines) - 1, -1, -1):
+        if re.search(r"(\?|까요|여쭤|골라 주|정해 주)", lines[i]):
+            qi = i
+            break
+    if qi is None:
+        return ""
+    def opt(l):
+        return re.match(r"^(\*\*|- \*\*|[①-⑨]|[A-D][.)]|\d+[.)]|- )", l) and not re.match(r"^[│┌└├|]", l)
+    opts = [l for l in lines[qi + 1: qi + 7] if opt(l)] or [l for l in lines[max(0, qi - 6): qi] if opt(l)]
+    def lab(l):
+        l = re.sub(r"^(- |\d+[.)]\s*)", "", l)
+        l = re.sub(r"\*\*|`", "", l)
+        return short(re.split(r"[:：—]| \(", l)[0], 40)
+    q = re.sub(r"\*\*|`|^#+\s*|^여쭤볼 것[:：]?\s*", "", lines[qi])
+    return short(q + (" — " + " / ".join(lab(o) for o in opts[:4]) if opts else ""), 300)
+
+
 def kst(ts):
     if not ts:
         return None
@@ -186,7 +215,8 @@ def read_helper(jsonl):
 
 def new_ev():
     return {"first": None, "last": None, "test_write": None, "fail": None, "impl": None, "pass": None,
-            "commit": None, "steps": None, "now": "", "last_text": "", "tools": 0, "_pending": {}, "acts": []}
+            "commit": None, "steps": None, "now": "", "last_text": "", "tools": 0, "_pending": {}, "acts": [],
+            "files": [], "commits": 0, "tests": ""}
 
 
 def scan_lines(lines, ev=None):
@@ -213,6 +243,9 @@ def scan_lines(lines, ev=None):
                 if name in ("Edit", "Write", "MultiEdit"):
                     p = inp.get("file_path", "")
                     base = os.path.basename(p)
+                    fl = ev.setdefault("files", [])
+                    if base and base not in fl and len(fl) < 40:
+                        fl.append(base)
                     if TEST_FILE.search(p):
                         ev["test_write"] = ev["test_write"] or ts
                         ev["now"] = f"시험 파일 {base} 쓰는 중"
@@ -265,12 +298,15 @@ def scan_lines(lines, ev=None):
                 out = text_of(b.get("content"))
                 if kind[0] == "commit":
                     ev["commit"] = ts or kind[1]
+                    ev["commits"] = ev.get("commits", 0) + 1
                 elif kind[0] == "test":
                     if FAIL_OUT.search(out):
                         if not ev["pass"]:
                             ev["fail"] = ev["fail"] or ts
+                        ev["tests"] = "실패"
                     elif PASS_OUT.search(out):
                         ev["pass"] = ts
+                        ev["tests"] = "통과"
     return ev
 
 
@@ -351,13 +387,57 @@ def save_state(path, st):
 RELEVANT = {"Skill", "Write", "AskUserQuestion", "Agent"}
 
 
+def open_turn(st, ts, said, asked, kind):
+    turns = st.setdefault("turns", [])
+    turns.append({"ts": ts, "said": said, "asked": asked, "kind": kind, "first": "", "last": "", "last_ts": None,
+                  "helpers": [], "ev": None})
+    del turns[:-300]
+
+
+def turn_out(tn, live):
+    ev = tn.get("ev") or {}
+    last = clean_md(tn.get("last", ""), 600)
+    sents = re.findall(r".+?(?:[.!?。]|니다|어요|해요)(?=\s|$)", last)
+    acts = [past(a[1]) for a in (ev.get("acts") or [])][-4:]
+    return {"time": hm(tn["ts"]), "date": md(tn["ts"]), "said": tn["said"], "short": is_short(tn["said"]),
+            "kind": tn.get("kind", ""), "asked": tn.get("asked", ""), "first": tn.get("first", ""),
+            "last": short(" ".join(sents[:2]) if sents else last, 200), "last_time": hm(tn.get("last_ts")),
+            "helpers": tn.get("helpers", []), "files": ev.get("files", []), "commits": ev.get("commits", 0),
+            "tests": ev.get("tests", ""), "acts": acts, "state": "working" if live else "done"}
+
+
+def iter_new_lines(path, st, chunk=4 << 20):
+    """offset 뒤의 온전한 줄을 4MB 씩 나눠 읽는다(큰 기록도 메모리를 적게)."""
+    off = st.get("offset", 0)
+    with open(path, "rb") as f:
+        f.seek(off)
+        buf = b""
+        while True:
+            part = f.read(chunk)
+            if not part:
+                break
+            buf += part
+            cut = buf.rfind(b"\n")
+            if cut < 0:
+                continue
+            for raw in buf[: cut + 1].splitlines():
+                try:
+                    yield json.loads(raw)
+                except Exception:
+                    continue
+            off += cut + 1
+            st["offset"] = off
+            buf = buf[cut + 1:]
+
+
 def update_main(tr, st):
     """세션 기록의 새 줄만 읽어 지도에 쓸 사건만 모은다."""
-    lines, st["offset"], reset = read_new_lines(tr, st.get("offset", 0))
-    if reset:
-        st.clear()
-        st["offset"] = 0
-        lines, st["offset"], _ = read_new_lines(tr, 0)
+    try:
+        if os.path.getsize(tr) < st.get("offset", 0):
+            st.clear()
+    except OSError:
+        return st
+    lines = iter_new_lines(tr, st)
     st.setdefault("events", [])
     seen = set(st.get("seen", []))
     agent_ids = set(e[2] for e in st["events"] if e[0] == "agent")
@@ -396,11 +476,23 @@ def update_main(tr, st):
                 done_ids.clear()
         if d.get("type") == "user" and isinstance(content, str) and not d.get("isMeta"):
             x = content.lstrip()
-            if x and not x.startswith(("<", "[SYSTEM", "Another Claude", "Caveat:", "[Request interrupted")):
+            if x and not x.startswith(("<", "[SYSTEM", "Another Claude", "Caveat:", "[Request interrupted", "This session is being continued")) and not d.get("isCompactSummary"):
                 st["asked"] = None
                 st["prompt"], st["prompt_ts"], st["seg"] = x[:400], ts, new_ev()
+                open_turn(st, ts, x[:400], ask_context(st.get("last_ai", "")), "")
             continue
+        # 선택 상자 답(AskUserQuestion 결과)도 지시 하나로
+        if d.get("type") == "user" and isinstance(content, list) and st.get("pending_ask"):
+            for b in content:
+                if b.get("type") == "tool_result" and b.get("tool_use_id") == st["pending_ask"]["id"]:
+                    r = text_of(b.get("content"))
+                    picks = re.findall(r'"([^"]{1,200})"="([^"]{1,300})"', r)
+                    pick = " / ".join(a for _, a in picks) or short(r, 200)
+                    pa = st.pop("pending_ask")
+                    open_turn(st, ts, pick, pa["q"], "pick")
         st["seg"] = scan_lines([d], st.get("seg"))
+        if st.get("turns"):
+            st["turns"][-1]["ev"] = scan_lines([d], st["turns"][-1].get("ev"))
         if not isinstance(content, list):
             continue
         for b in content:
@@ -409,6 +501,12 @@ def update_main(tr, st):
                 txt = b["text"]
                 if hangul(txt):
                     st["words"], st["words_ts"] = txt[:1200], ts
+                    st["last_ai"] = txt[-1500:]
+                    if st.get("turns"):
+                        tn = st["turns"][-1]
+                        if not tn["first"]:
+                            tn["first"] = first_sentence(clean_md(txt, 400), 160)
+                        tn["last"], tn["last_ts"] = txt[:1200], ts
                     # 도우미가 끝난 뒤 세션이 처음 쓴 한국어 글 = 그 도우미 일의 쉬운 설명
                     for aid in st.get("waiting_after", []):
                         st.setdefault("after", {})[aid] = txt[:1500]
@@ -430,8 +528,13 @@ def update_main(tr, st):
             elif name == "AskUserQuestion":
                 qs = inp.get("questions") or []
                 st["asked"] = short(qs[0].get("question") if qs else "질문", 120)
+                q0 = qs[0] if qs else {}
+                labs = [o.get("label", "") for o in (q0.get("options") or [])][:4]
+                st["pending_ask"] = {"id": b.get("id"), "q": short((q0.get("question") or "질문") + (" — " + " / ".join(labs) if labs else ""), 300)}
             elif name == "Agent":
                 agent_ids.add(b.get("id"))
+                if st.get("turns"):
+                    st["turns"][-1]["helpers"].append(inp.get("description") or "")
                 st["events"].append(["agent", ts, b.get("id"), inp.get("description") or "", inp.get("subagent_type") or "",
                                      first_sentence(re.sub(r"^너는[^.]*?\.\s*", "", inp.get("prompt") or ""), 150),
                                      inp.get("model") or ""])
@@ -597,6 +700,7 @@ def build_map(sid, tr):
                 for h in running_helpers],
         "phases": out_phases,
         "built": datetime.now(KST).strftime("%H:%M:%S"),
+        "turns": [turn_out(tn, False) for tn in (st.get("turns") or [])],
         "direct": {"prompt": first_sentence(last_prompt, 90), "since": hm(last_prompt_ts), "since_ts": last_prompt_ts,
                    "ev": main_ev},
     }
@@ -615,6 +719,8 @@ def overlay_live(m, live):
         m["asked"] = m.get("asked") or "확인 · 허락을 기다리는 중"
     elif live in ("idle", "shell", ""):
         m["status"] = "asking" if m.get("asked") else "idle"
+    if m.get("turns") and m["status"] == "working":
+        m["turns"][-1]["state"] = "working"
     d = m.get("direct") or {}
     if m["status"] != "working" or m.get("now"):
         return
@@ -710,7 +816,7 @@ def build_codex_map(path, alive):
             model = ((p.get("thread_settings") or {}).get("model")) or model
         elif t == "event_msg" and pt == "task_started":
             cur = {"start": ts, "end": None, "prompt": "", "acts": [], "answer": "", "state": "working",
-                   "fail": None, "pass": None}
+                   "fail": None, "pass": None, "first": "", "asked": ask_context(turns[-1]["answer"] if turns else "")}
             turns.append(cur)
         elif t == "event_msg" and pt == "item_completed" and cur is not None:
             it = p.get("item") or {}
@@ -734,6 +840,8 @@ def build_codex_map(path, alive):
             txt = text_of(p.get("content"))
             if txt.strip() and (hangul(txt) or not words):
                 words, words_ts = txt[:1200], ts
+            if cur is not None and txt.strip() and not cur["first"]:
+                cur["first"] = first_sentence(clean_md(txt, 400), 160)
         elif t == "event_msg" and pt in ("task_complete", "turn_aborted") and cur is not None:
             cur["end"] = ts
             cur["state"] = "done" if pt == "task_complete" else "aborted"
@@ -763,7 +871,15 @@ def build_codex_map(path, alive):
         })
     working = [c for c in cards if c["state"] == "working"]
     started = kst(first_ts)
+    cturns = []
+    for tn, cd in zip(turns, cards):
+        cturns.append({"time": hm(tn["start"]), "date": md(tn["start"]), "said": tn["prompt"][:400], "short": is_short(tn["prompt"]),
+                       "kind": "", "asked": tn.get("asked", ""), "first": tn.get("first", ""), "last": cd["done_text"],
+                       "last_time": hm(tn["end"]), "helpers": [], "files": [], "commits": sum(1 for a in tn["acts"] if a[1] == "커밋"),
+                       "tests": "실패" if tn["fail"] and not tn["pass"] else ("통과" if tn["pass"] else ""),
+                       "acts": [a[1] for a in tn["acts"]][-4:], "state": cd["state"]})
     return {
+        "turns": cturns,
         "session": "codex:" + (sid or os.path.basename(path)), "transcript": path, "agent": "codex",
         "started": md(first_ts), "days": (datetime.now(KST).date() - started.date()).days + 1 if started else 0,
         "helpers": 0, "status": "working" if working else "idle", "asked": None,

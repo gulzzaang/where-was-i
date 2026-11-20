@@ -438,7 +438,7 @@ def build_map(sid, tr):
             running = (bool(h["jsonl"]) and os.path.exists(h["jsonl"]) and now_t - os.path.getmtime(h["jsonl"]) < RUNNING_SEC
                        and ev["now"] != "보고하고 끝냄")
             h.update(running=running, end=ev["last"], now=ev["now"] or ("일하는 중" if running else "끝"),
-                     said=first_sentence(ev.get("report") or ev["last_text"], 160), cells=helper_cells(h["kind"], ev, running))
+                     said=first_sentence(re.sub(r"(?mi)^\W*(상태|status|결과)\s*[:：].*$", "", ev.get("report") or "").strip() or ev["last_text"], 160), cells=helper_cells(h["kind"], ev, running))
             if running:
                 running_helpers.append(h)
     save_state(hpath, hcache)

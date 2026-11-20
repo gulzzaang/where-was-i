@@ -21,7 +21,8 @@ HOME = os.path.expanduser("~")
 CLAUDE = os.path.join(HOME, ".claude")
 KST = timezone(timedelta(hours=9))
 CACHE = os.path.join(HOME, ".cache", "where-was-i")
-RUNNING_SEC = 120  # 도우미 기록이 이 안에 바뀌었으면 「일하는 중」
+RUNNING_SEC = 120
+SESSION_ALIVE = True  # main() 이 정한다: 세션이 아직 떠 있는지  # 도우미 기록이 이 안에 바뀌었으면 「일하는 중」
 
 TEST_FILE = re.compile(r"(_test\.|\.test\.|\.spec\.|/tests?/|test_[^/]*\.py$)")
 TEST_CMD = re.compile(r"(go test|pytest|unittest|vitest|jest|pnpm (run )?test|npm (run )?test|gradlew? .*test|make test)")
@@ -366,9 +367,11 @@ def update_main(tr, st):
         content = m.get("content")
         att = d.get("attachment") if d.get("type") == "attachment" else None
         if isinstance(att, dict) and "<task-notification>" in str(att.get("prompt") or ""):
-            for m3 in re.finditer(r"<tool-use-id>([^<]+)</tool-use-id>[\s\S]{0,800}?<status>completed</status>", str(att["prompt"])):
+            for m3 in re.finditer(r"<tool-use-id>([^<]+)</tool-use-id>[\s\S]{0,800}?<status>(\w+)</status>", str(att["prompt"])):
                 if m3.group(1) in agent_ids:
-                    done_ids.append(m3.group(1))
+                    st.setdefault("ended", {})[m3.group(1)] = m3.group(2)
+                    if m3.group(2) == "completed":
+                        done_ids.append(m3.group(1))
         if d.get("type") in ("user", "attachment"):
             note = content if isinstance(content, str) else ""
             if isinstance(content, list):
@@ -377,6 +380,7 @@ def update_main(tr, st):
                         r = text_of(b.get("content"))
                         if "Async agent launched" not in r and "launched successfully" not in r:
                             done_ids.append(b.get("tool_use_id"))
+                            st.setdefault("ended", {})[b.get("tool_use_id")] = "completed"
                     elif b.get("type") == "text":
                         note += b.get("text", "")
             for m3 in re.finditer(r"<tool-use-id>([^<]+)</tool-use-id>[\s\S]{0,800}?<status>completed</status>", note):
@@ -500,11 +504,17 @@ def build_map(sid, tr):
             else:
                 ev = new_ev()
                 ev["first"] = ev["last"] = h["start"]
-            running = (bool(h["jsonl"]) and os.path.exists(h["jsonl"]) and now_t - os.path.getmtime(h["jsonl"]) < RUNNING_SEC
-                       and ev["now"] != "보고하고 끝냄")
+            ended = (st.get("ended") or {}).get(h["id"])
+            # 끝 알림이 없고 보고도 안 했으면 일하는 중(오래 걸리는 명령으로 기록이 한동안 안 바뀌어도).
+            # 세션이 이미 꺼졌거나 6시간 넘게 기록이 안 바뀌었으면 멈춘 것으로 본다.
+            fresh = bool(h["jsonl"]) and os.path.exists(h["jsonl"]) and now_t - os.path.getmtime(h["jsonl"]) < 6 * 3600
+            running = (not ended) and ev["now"] != "보고하고 끝냄" and fresh and SESSION_ALIVE
+            h["ended"] = ended or ""
             h["after"] = (st.get("after") or {}).get(h["id"], "")
             h["report"] = ev.get("report", "")
-            h.update(running=running, end=ev["last"], now=ev["now"] or ("일하는 중" if running else "끝"),
+            stopped = ended and ended != "completed"
+            h.update(running=running, end=ev["last"],
+                     now=(f"멈춤({ended})" if stopped else (ev["now"] or ("일하는 중" if running else "끝"))),
                      said=first_sentence(re.sub(r"(?mi)^\W*(상태|status|결과)\s*[:：].*$", "", ev.get("report") or "").strip() or ev["last_text"], 160), cells=helper_cells(h["kind"], ev, running))
             if running:
                 running_helpers.append(h)
@@ -652,6 +662,8 @@ def main(argv):
     if not s or not s.get("transcript"):
         print(json.dumps({"error": "no-session", "terminal": term, "session": sid}, ensure_ascii=False))
         return 0
+    global SESSION_ALIVE
+    SESSION_ALIVE = "status" in s
     m = cached_map(s["session"], s["transcript"])
     overlay_live(m, s.get("status") or "")
     m.update(name=s.get("name") or "", named=s.get("named"), terminal=s.get("terminal"), cwd=s.get("cwd"))

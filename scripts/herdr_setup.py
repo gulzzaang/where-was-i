@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""where was i — herdr 칸 설치 · 지우기.
+"""where was i — herdr 칸 · Claude Code 훅 설치 · 지우기.
 
-  python3 scripts/herdr_setup.py install    칸 복사 · 레이아웃(main-progress) · 단축키
+  python3 scripts/herdr_setup.py install    칸 복사 · 레이아웃(main-progress) · 단축키 · Claude 훅(토큰 0)
   python3 scripts/herdr_setup.py update     저장소를 새로 받고(git pull) 다시 설치
-  python3 scripts/herdr_setup.py uninstall  위를 모두 걷는다(칸 · 레이아웃은 휴지통으로, 단축키는 우리 것만)
+  python3 scripts/herdr_setup.py uninstall  위를 모두 걷는다(칸 · 레이아웃은 휴지통으로, 단축키 · 훅은 우리 것만)
 
 정해 둔 설치 자리: ~/.where-was-i (git clone https://github.com/gulzzaang/where-was-i.git ~/.where-was-i)
 
@@ -15,7 +15,11 @@ import json, os, shutil, subprocess, sys, time
 
 HOME = os.path.expanduser("~")
 APP = os.path.join(HOME, ".config", "herdr-app")
+CLAUDE_DIR = os.path.join(HOME, ".claude")
+CLAUDE_SETTINGS = os.path.join(CLAUDE_DIR, "settings.json")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HOOK_SCRIPT = os.path.join(REPO, "wwi_hook.py")
+HOOK_MARKER = "wwi_hook.py"
 MOD_SRC = os.path.join(REPO, "herdr-mod", "where-was-i")
 MOD_DST = os.path.join(APP, "mods", "where-was-i")
 LAYOUT = os.path.join(APP, "layouts", "main-progress.json")
@@ -24,6 +28,18 @@ CACHE = os.path.join(HOME, ".cache", "where-was-i")
 OURS = [("global", "cmd-shift-i", "layout.toggle:where-was-i"),
         ("layout:main", "cmd-alt-i", "layout.switch:main-progress"),
         ("layout:main-progress", "cmd-alt-i", "layout.switch:main")]
+# (이벤트 이름, matcher 또는 None, async 여부, timeout 초)
+HOOK_SPECS = [
+    ("SessionStart", None, False, 3),
+    ("SessionEnd", None, False, 2),
+    ("UserPromptSubmit", None, True, 3),
+    ("PreToolUse", "*", True, 3),
+    ("PostToolUse", "*", True, 3),
+    ("SubagentStart", None, True, 3),
+    ("SubagentStop", None, True, 3),
+    ("Notification", None, True, 3),
+    ("Stop", None, True, 3),
+]
 BLOCK = {"id": "where-was-i", "type": "block", "size": {"px": 400}, "min": 300, "max": 800, "resizable": True,
          "background": "chrome", "radius": 10, "border": {"width": 1, "color": "border"}, "content": {"mod": "where-was-i"}}
 
@@ -62,6 +78,94 @@ def to_trash(path):
     return None
 
 
+def atomic_json_dump(path, data, indent=2):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=indent)
+    os.replace(tmp, path)
+
+
+def _is_our_hook_group(group):
+    if not isinstance(group, dict):
+        return False
+    hooks = group.get("hooks")
+    if not isinstance(hooks, list):
+        return False
+    return any(isinstance(h, dict) and HOOK_MARKER in str(h.get("command") or "") for h in hooks)
+
+
+def _strip_our_hooks(settings):
+    """settings['hooks'] 에서 where-was-i 훅만 걷어내고 나머지(버디 등)는 그대로 둔다."""
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return 0
+    removed = 0
+    for ev_name in list(hooks.keys()):
+        groups = hooks.get(ev_name)
+        if not isinstance(groups, list):
+            continue
+        new_groups = []
+        ev_removed = 0
+        for g in groups:
+            if not isinstance(g, dict) or not isinstance(g.get("hooks"), list):
+                new_groups.append(g)
+                continue
+            kept = [h for h in g["hooks"] if not (isinstance(h, dict) and HOOK_MARKER in str(h.get("command") or ""))]
+            diff = len(g["hooks"]) - len(kept)
+            removed += diff
+            ev_removed += diff
+            if kept:
+                if diff:
+                    g = dict(g)
+                    g["hooks"] = kept
+                new_groups.append(g)
+        if new_groups:
+            hooks[ev_name] = new_groups
+        elif ev_name in hooks and ev_removed:
+            del hooks[ev_name]
+    return removed
+
+
+def install_hooks(settings_path=CLAUDE_SETTINGS, hook_script=HOOK_SCRIPT):
+    """~/.claude/settings.json 에 토큰 0 기록 훅을 넣는다(기존 훅은 그대로 유지, 중복 방지)."""
+    if not os.path.exists(hook_script):
+        print("✗ 훅 스크립트를 못 찾음:", hook_script)
+        return False
+    if os.path.exists(settings_path):
+        shutil.copy(settings_path, settings_path + ".bak-where-was-i")
+        with open(settings_path, encoding="utf-8") as f:
+            settings = json.load(f)
+    else:
+        settings = {}
+    _strip_our_hooks(settings)
+    hooks = settings.setdefault("hooks", {})
+    cmd = f'python3 "{hook_script}"'
+    for ev_name, matcher, is_async, timeout in HOOK_SPECS:
+        entry = {"type": "command", "command": cmd, "timeout": timeout}
+        if is_async:
+            entry["async"] = True
+        group = {"hooks": [entry]}
+        if matcher is not None:
+            group["matcher"] = matcher
+        hooks.setdefault(ev_name, []).append(group)
+    atomic_json_dump(settings_path, settings, indent=2)
+    return True
+
+
+def uninstall_hooks(settings_path=CLAUDE_SETTINGS):
+    """~/.claude/settings.json 에서 where-was-i 훅만 걷는다."""
+    if not os.path.exists(settings_path):
+        return 0
+    shutil.copy(settings_path, settings_path + ".bak-where-was-i-uninstall")
+    with open(settings_path, encoding="utf-8") as f:
+        settings = json.load(f)
+    removed = _strip_our_hooks(settings)
+    if removed:
+        atomic_json_dump(settings_path, settings, indent=2)
+    return removed
+
+
 def check():
     """설치 전 점검: herdr 앱 · 파이썬 · Claude Code."""
     ok = True
@@ -75,8 +179,7 @@ def check():
     print("· Claude Code:", v or "못 찾음(Codex 만 써도 됨)")
     sdir = os.path.join(HOME, ".claude", "sessions")
     if v and not (os.path.isdir(sdir) and any(f.endswith(".json") for f in os.listdir(sdir))):
-        print("  ! ~/.claude/sessions 가 비어 있음 — 이 Claude Code 판은 세션 정보 파일을 안 남겨서 칸이 세션을 못 찾을 수 있다."
-              " `claude update` 로 새 판을 받고 Claude Code 를 한 번 열어 둔 뒤 다시 보세요")
+        print("  · ~/.claude/sessions 가 비어 있음 — 새로 여는 Claude Code 세션은 이번에 넣는 훅이 바로 잡는다")
     if ok:
         st = app("status")
         if st.returncode != 0 or '"layout"' not in st.stdout:
@@ -124,9 +227,14 @@ def install():
         k[sec][key] = act
     json.dump(k, open(KEYS, "w"), ensure_ascii=False, indent=2)
     print("단축키: ⌘⇧I 칸 숨김 · 보임, ⌘⌥I 아예 켜기 · 끄기")
+    if os.path.isdir(CLAUDE_DIR) or shutil.which("claude"):
+        if install_hooks():
+            print("Claude 훅(토큰 0):", CLAUDE_SETTINGS, "(백업: .bak-where-was-i, 새로 여는 세션부터 적용)")
     # 설치 뒤 스스로 확인
     chk = app("check", MOD_DST)
     print("· 칸 검사:", "통과" if chk.returncode == 0 else "실패 — " + (chk.stdout + chk.stderr).strip()[-300:])
+    hchk = subprocess.run([sys.executable, HOOK_SCRIPT, "--self-check"], capture_output=True, text=True, timeout=10)
+    print("· 훅 검사:", "통과" if hchk.returncode == 0 and hchk.stdout.strip() == "ok" else "실패 — " + (hchk.stdout + hchk.stderr).strip()[-200:])
     try:
         n = len(json.loads(subprocess.run([sys.executable, os.path.join(REPO, "pmap.py"), "list"], capture_output=True, text=True, timeout=60).stdout or "[]"))
         print(f"· 지금 떠 있는 세션 {n}개 찾음" + ("" if n else " — Claude Code 를 herdr 안에서 하나 열면 칸에 나온다"))
@@ -159,13 +267,16 @@ def uninstall():
                     del k[sec]
         json.dump(k, open(KEYS, "w"), ensure_ascii=False, indent=2)
         print("단축키 걷음(우리가 넣은 것만)")
+    removed = uninstall_hooks()
+    if removed:
+        print(f"Claude 훅 걷음({removed}개, 우리 것만, 백업: .bak-where-was-i-uninstall)")
     for p in (MOD_DST, LAYOUT):
         t = to_trash(p)
         if t:
             print("휴지통으로:", p)
     if os.path.isdir(CACHE):
         shutil.rmtree(CACHE)
-        print("읽기 기록 지움:", CACHE)
+        print("읽기 · 훅 기록 지움:", CACHE)
     print(f"저장소({REPO})는 그대로 둠 — 이것까지 지우려면 그 폴더를 휴지통으로")
 
 

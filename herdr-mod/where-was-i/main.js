@@ -415,7 +415,7 @@ export default class WhereWasI extends View {
         v_flex().px(14).pt(10).pb(12).gap(10).children(parts),
       ]),
       div().px(14).py(6).border_t(1).border_color(t.border).text_size(10).text_color(t.dim)
-        .child(`대화 기록에서 읽음 · ${d.built}${this.busy ? " · 다시 읽는 중" : ""}`),
+        .child(`${d.source === "hook+log" ? "훅 + 대화 기록" : "대화 기록에서 읽음"} · ${d.built}${this.busy ? " · 다시 읽는 중" : ""}`),
     ]);
   }
 }

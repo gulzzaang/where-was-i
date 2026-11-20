@@ -1,12 +1,12 @@
 # where was i
 
-Claude Code(와 Codex) 세션이 **무엇을 지시받아 어떻게, 어디까지 일했는지**를 herdr 오른쪽 칸에 보여 주는 개인 도구다. 세션의 대화 기록 파일을 읽기만 하고 AI를 부르지 않는다(토큰 0).
+Claude Code(와 Codex) 세션이 **무엇을 지시받아 어떻게, 어디까지 일했는지**를 herdr 오른쪽 칸에 보여 주는 개인 도구다. Claude Code 훅과 대화 기록 파일을 로컬에서만 읽고 적으며 AI를 부르지 않는다(토큰 0).
 
 프로토타입이다.
 
 ## 팀원이 처음 깔 때
 
-준비물: herdr 앱(**설치할 때 창이 열려 있어야 함**, `herdr-app` 명령이 PATH 에 있음), python3 3.9 이상(맥 기본 것으로 됨), Claude Code(새 판 — `~/.claude/sessions` 를 남기는 판) 또는 Codex. 설치가 이것들을 먼저 점검하고, 끝나면 칸 검사 · 세션 찾기까지 스스로 확인한다.
+준비물: herdr 앱(**설치할 때 창이 열려 있어야 함**, `herdr-app` 명령이 PATH 에 있음), python3 3.9 이상(맥 기본 것으로 됨), Claude Code 또는 Codex. 설치가 이것들을 먼저 점검하고, 끝나면 칸 검사 · 훅 검사 · 세션 찾기까지 스스로 확인한다.
 
 설치 자리는 **`~/.where-was-i`** 로 정해 둔다(어느 AI 든 이 자리만 보면 되게).
 
@@ -15,7 +15,7 @@ git clone https://github.com/gulzzaang/where-was-i.git ~/.where-was-i
 python3 ~/.where-was-i/scripts/herdr_setup.py install
 ```
 
-그다음 herdr 에서 **⌘⌥I** 를 누르면 오른쪽에 칸이 나온다. AI 에게 「where was i 설치해 줘」라고 해도 된다.
+그다음 herdr 에서 **⌘⌥I** 를 누르면 오른쪽에 칸이 나온다. AI 에게 「버디 팀 메모리에 있는 where was i 도구를 설치해줘」라고 해도 된다.
 
 | 할 일 | 명령 |
 |---|---|
@@ -23,11 +23,12 @@ python3 ~/.where-was-i/scripts/herdr_setup.py install
 | 업데이트 | `python3 ~/.where-was-i/scripts/herdr_setup.py update` (새로 받고 다시 설치) |
 | 지우기 | `python3 ~/.where-was-i/scripts/herdr_setup.py uninstall` (저장소 폴더 `~/.where-was-i` 도 지우려면 그다음 휴지통으로) |
 
-설치하면 생기는 것: 저장소 `~/.where-was-i`, herdr 칸 `~/.config/herdr-app/mods/where-was-i`, 레이아웃 `~/.config/herdr-app/layouts/main-progress.json`, 단축키 3개(`~/.config/herdr-app/keys.json`, 바꾸기 전 `.bak-where-was-i` 백업), 읽기 기록 `~/.cache/where-was-i`.
+설치하면 생기는 것: 저장소 `~/.where-was-i`, herdr 칸 `~/.config/herdr-app/mods/where-was-i`, 레이아웃 `~/.config/herdr-app/layouts/main-progress.json`, 단축키 3개(`~/.config/herdr-app/keys.json`, 바꾸기 전 `.bak-where-was-i` 백업), Claude Code 훅(`~/.claude/settings.json`, 바꾸기 전 `.bak-where-was-i` 백업, 버디 등 기존 훅은 건드리지 않음), 읽기 · 훅 기록 `~/.cache/where-was-i`.
 
 **알아 둘 것**
-- 이 맥 안의 기록 파일만 읽는다. AI 를 부르지 않고(토큰 0), 바깥으로 보내는 것도 없다.
-- 프로토타입이다. Claude Code 내부 기록 모양을 읽어서, Claude Code 판이 오르면 깨질 수 있다. 단계 칸은 기록 흔적으로 짐작한 것이다.
+- 이 맥 안의 기록 파일만 읽고 적는다. AI 를 부르지 않고(토큰 0), 바깥으로 보내는 것도 없다.
+- 훅은 세션 시작(herdr 칸 ↔ 세션 짝짓기) · 도우미 시작/끝 · 도구/질문/권한 대기 상태를 로컬 캐시에만 적고, AI 중간 글과 설치 전 세션은 기존처럼 대화 기록(JSONL)에서 채운다.
+- 설치하기 전에 이미 떠 있던 세션은 기존 기록 파일 방식으로 동작하고, 새로 여는 세션부터 훅이 붙는다.
 - herdr 가 없는 사람(Orca 등)용 브라우저 페이지는 아직 없다.
 
 ## 쓰는 법
@@ -44,17 +45,18 @@ python3 ~/.where-was-i/scripts/herdr_setup.py install
   - 칸을 `~/.config/herdr-app/mods/where-was-i` 로 복사하고, 없으면 레이아웃 `main-progress` 를 만들어 오른쪽에 칸을 붙이고, 위 단축키를 넣는다(`keys.json` 은 `.bak-where-was-i` 로 백업, 이미 다른 뜻으로 쓰는 키는 건너뜀).
   - 칸 코드를 고친 뒤 `herdr-app check herdr-mod/where-was-i` 를 먼저 통과시킨다.
 - **지우기**: `python3 ~/.where-was-i/scripts/herdr_setup.py uninstall`
-  - 진행 지도 화면이면 기본 화면으로 돌리고, 우리가 넣은 단축키만 걷고(`keys.json` 백업), 칸 폴더와 레이아웃 복사본은 휴지통으로, 읽기 기록(`~/.cache/where-was-i`)은 지운다. 이 저장소는 그대로 둔다.
+  - 진행 지도 화면이면 기본 화면으로 돌리고, 우리가 넣은 단축키(`keys.json` 백업)와 Claude Code 훅(`~/.claude/settings.json` 백업)만 걷고, 칸 폴더와 레이아웃 복사본은 휴지통으로, 읽기 · 훅 기록(`~/.cache/where-was-i`)은 지운다. 이 저장소는 그대로 둔다.
 - 화면 확인: `herdr-app shot <파일.png>`(화면 기록 권한 없이 herdr 창만 찍는다).
 
 ## 파일
 
-- `pmap.py`: 기록을 읽어 지도 자료(JSON)를 만든다. `list`, `map --terminal tNN`, `map --session <id>`, `map --codex-file <rollout.jsonl>`.
+- `wwi_hook.py`: Claude Code 훅 기록기(토큰 0). 세션 ↔ herdr 칸 · 도우미 시작/끝 · 도구/질문/권한 대기 상태를 `~/.cache/where-was-i/hooks/` 에만 적는다.
+- `pmap.py`: 훅 기록과 대화 기록을 함께 읽어 지도 자료(JSON)를 만든다. `list`, `map --terminal tNN`, `map --session <id>`, `map --codex-file <rollout.jsonl>`.
 - `herdr-mod/where-was-i/`: herdr 칸(gpui-kit JS).
-- `scripts/herdr_setup.py`: 설치 · 지우기.
+- `scripts/herdr_setup.py`: 설치 · 업데이트 · 지우기.
 
 ## 자원(2026-11-20 측정)
 
-- 토큰 0. 기록을 새로 붙은 줄만 이어 읽는다(한 번 0.2초 · 21MB, 처음 한 번 1.5초 · 67MB).
+- 토큰 0. 훅은 로컬 캐시에만 한 줄씩 적고(`async: true` 로 도구 대기 0ms, 실행 자체는 평균 약 37ms), 대화 기록은 새로 붙은 줄만 이어 읽는다(한 번 0.2초 · 21MB, 처음 한 번 1.5초 · 67MB).
 - herdr 앱 CPU: 칸을 띄워도 숨긴 것과 차이가 거의 없다(움직이는 표시 없음, 자료가 바뀔 때만 다시 그림).
-- 읽기 기록은 `~/.cache/where-was-i`, 14일 지나면 지운다.
+- 읽기 · 훅 기록은 `~/.cache/where-was-i`, 14일 지나면 지운다.

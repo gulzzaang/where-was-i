@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""where was i 프로토타입 — Claude Code 대화 기록 파일을 읽어 세션 하나의 지도 자료(JSON)를 만든다.
+"""where was i 프로토타입 — Claude Code 훅 기록과 대화 기록 파일을 함께 읽어 세션 하나의 지도 자료(JSON)를 만든다.
 
-프로토타입이다. 설계서의 「지난 기록 채우기」 부분만 먼저 만든 것이고, 훅 기록은 다음 단계다.
+훅 기록(토큰 0)으로 herdr 칸 ↔ 세션 짝짓기 · 도우미 시작/끝 · 도구/질문/권한 대기 상태를 정확히 잡고,
+AI 중간 글과 설치 전 세션은 대화 기록 파일(JSONL)에서 이어 채운다.
 쓰는 법:
   python3 pmap.py list                     떠 있는 Claude 세션 목록(JSON)
   python3 pmap.py map --terminal t29       herdr 칸 번호로 세션 지도
@@ -21,6 +22,9 @@ HOME = os.path.expanduser("~")
 CLAUDE = os.path.join(HOME, ".claude")
 KST = timezone(timedelta(hours=9))
 CACHE = os.path.join(HOME, ".cache", "where-was-i")
+HOOK_DIR = os.path.join(CACHE, "hooks")
+HOOK_SESSIONS = os.path.join(HOOK_DIR, "sessions")
+HOOK_EVENTS = os.path.join(HOOK_DIR, "events")
 RUNNING_SEC = 120
 SESSION_ALIVE = True  # main() 이 정한다: 세션이 아직 떠 있는지  # 도우미 기록이 이 안에 바뀌었으면 「일하는 중」
 
@@ -141,6 +145,271 @@ def iter_jsonl(path):
         return
 
 
+# ── 훅 기록 읽기 ──────────────────────────────────────────
+
+def safe_sid(sid):
+    return re.sub(r"[^A-Za-z0-9._-]", "_", str(sid or ""))[:120]
+
+
+def _apply_hook_tool(ev, ts, tool, info):
+    """훅 PreToolUse 한 건을 ev(scan_lines 와 같은 모양)에 반영한다."""
+    info = info if isinstance(info, dict) else {}
+    if ts:
+        ev["first"] = ev["first"] or ts
+        ev["last"] = ts
+    ev["tools"] = ev.get("tools", 0) + 1
+    before = ev.get("now", "")
+    act = info.get("act") or ""
+    if tool in ("Edit", "Write", "MultiEdit"):
+        base = info.get("file") or ""
+        fl = ev.setdefault("files", [])
+        if base and base not in fl and len(fl) < 40:
+            fl.append(base)
+        if info.get("test"):
+            ev["test_write"] = ev.get("test_write") or ts
+        elif ev.get("fail") or ev.get("test_write"):
+            ev["impl"] = ev.get("impl") or ts
+    elif tool == "Bash":
+        step = info.get("step")
+        if isinstance(step, list) and len(step) == 2:
+            ev["steps"] = ev.get("steps") or {"plan": [], "now": 0}
+            if step[0] == "plan" and isinstance(step[1], list):
+                ev["steps"]["plan"] = step[1]
+            elif step[0] == "now":
+                ev["steps"]["now"] = step[1]
+            else:
+                ev["steps"]["now"] = 999
+        if info.get("edit") and (ev.get("fail") or ev.get("test_write")):
+            ev["impl"] = ev.get("impl") or ts
+    if act:
+        ev["now"] = act
+        if act != before or not ev.get("acts"):
+            acts = ev.setdefault("acts", [])
+            if not acts or acts[-1][1] != act:
+                acts.append([ts, act])
+                del acts[:-12]
+
+
+def _apply_hook_result(ev, ts, res):
+    if ts:
+        ev["last"] = ts
+    if res == "commit":
+        ev["commit"] = ts or ev.get("commit")
+        ev["commits"] = ev.get("commits", 0) + 1
+    elif res == "fail":
+        if not ev.get("pass"):
+            ev["fail"] = ev.get("fail") or ts
+        ev["tests"] = "실패"
+    elif res == "pass":
+        ev["pass"] = ts
+        ev["tests"] = "통과"
+
+
+def read_hook_state(sid):
+    """세션의 훅 사건 파일(~/.cache/where-was-i/hooks/events/<sid>.jsonl)을 이어 읽어 상태를 만든다."""
+    if not sid:
+        return None
+    ssid = safe_sid(sid)
+    ev_path = os.path.join(HOOK_EVENTS, ssid + ".jsonl")
+    if not os.path.exists(ev_path):
+        return None
+    os.makedirs(CACHE, exist_ok=True)
+    cpath = os.path.join(CACHE, ssid + ".hookstate.json")
+    hst = load_state(cpath, {})
+    lines, off, reset = read_new_lines(ev_path, hst.get("offset", 0))
+    if reset:
+        hst = {}
+    if not lines and hst.get("has_hooks"):
+        return hst
+    hst["has_hooks"] = True
+    hst["offset"] = off
+    hst.setdefault("subagents", {})
+    hst.setdefault("agent_tools", {})
+    hst.setdefault("main_ev", new_ev())
+
+    for d in lines:
+        ts = d.get("ts") or ""
+        ev = d.get("ev") or ""
+        if ts:
+            hst["first_ts"] = hst.get("first_ts") or ts
+            hst["last_ts"] = ts
+        if ev == "session_start":
+            if d.get("term"):
+                hst["terminal"] = d["term"]
+            if d.get("cwd"):
+                hst["cwd"] = d["cwd"]
+            if d.get("tr"):
+                hst["transcript"] = d["tr"]
+            hst["ended"] = False
+            hst["status"] = "idle"
+            hst["status_ts"] = ts
+            hst["permission"] = None
+            hst["asked"] = None
+        elif ev == "session_end":
+            hst["ended"] = True
+            hst["status"] = "ended"
+            hst["status_ts"] = ts
+            hst["permission"] = None
+            for sub in hst["subagents"].values():
+                if sub.get("running"):
+                    sub["running"] = False
+                    sub["ended_at"] = sub.get("ended_at") or ts
+        elif ev == "prompt":
+            hst["ended"] = False
+            hst["status"] = "busy"
+            hst["status_ts"] = ts
+            hst["asked"] = None
+            hst["permission"] = None
+            hst["pending_tool"] = None
+            hst["last_prompt"] = d.get("said") or ""
+            hst["last_prompt_ts"] = ts
+            hst["now"] = "생각하는 중"
+            hst["now_ts"] = ts
+            hst["main_ev"] = new_ev()
+        elif ev == "pre_tool":
+            tool = d.get("tool") or ""
+            info = d.get("info") or {}
+            aid = d.get("aid") or ""
+            tid = d.get("id") or ""
+            if aid:
+                sub = hst["subagents"].setdefault(aid, {
+                    "agent_id": aid, "agent_type": "", "started_at": ts, "ended_at": None,
+                    "running": True, "transcript": "", "last_msg": "", "now": "", "now_ts": ts,
+                    "ev": new_ev(),
+                })
+                if not sub.get("ended_at"):
+                    sub["running"] = True
+                _apply_hook_tool(sub["ev"], ts, tool, info)
+                if info.get("act"):
+                    sub["now"] = info["act"]
+                    sub["now_ts"] = ts
+            else:
+                hst["permission"] = None
+                if tool == "AskUserQuestion":
+                    hst["status"] = "asking"
+                    hst["status_ts"] = ts
+                    hst["asked"] = info.get("q") or "질문"
+                else:
+                    hst["status"] = "busy"
+                    hst["status_ts"] = ts
+                    hst["asked"] = None
+                    _apply_hook_tool(hst["main_ev"], ts, tool, info)
+                    if info.get("act"):
+                        hst["now"] = info["act"]
+                        hst["now_ts"] = ts
+                    detail = info.get("brief") or info.get("file") or tool
+                    hst["pending_tool"] = {"id": tid, "tool": tool, "desc": f"{tool}({detail})" if detail and detail != tool else tool}
+                    if tool == "Agent" and tid:
+                        hst["agent_tools"][tid] = {
+                            "ts": ts, "desc": info.get("desc") or "", "atype": info.get("atype") or "",
+                            "model": info.get("model") or "", "done_ts": None,
+                        }
+        elif ev == "post_tool":
+            tool = d.get("tool") or ""
+            res = d.get("res") or ""
+            aid = d.get("aid") or ""
+            tid = d.get("id") or ""
+            if aid:
+                sub = hst["subagents"].get(aid)
+                if sub:
+                    _apply_hook_result(sub["ev"], ts, res)
+            else:
+                hst["permission"] = None
+                if tool == "AskUserQuestion":
+                    hst["asked"] = None
+                    hst["status"] = "busy"
+                    hst["status_ts"] = ts
+                if tool == "Agent" and tid in hst["agent_tools"] and res != "async":
+                    hst["agent_tools"][tid]["done_ts"] = ts
+                _apply_hook_result(hst["main_ev"], ts, res)
+        elif ev == "tool_fail":
+            hst["permission"] = None
+            if (d.get("tool") or "") == "AskUserQuestion":
+                hst["asked"] = None
+        elif ev == "sub_start":
+            aid = d.get("aid") or ""
+            if aid:
+                sub = hst["subagents"].setdefault(aid, {
+                    "agent_id": aid, "agent_type": "", "started_at": ts, "ended_at": None,
+                    "running": True, "transcript": "", "last_msg": "", "now": "시작함", "now_ts": ts,
+                    "ev": new_ev(),
+                })
+                sub["agent_type"] = d.get("atype") or sub.get("agent_type") or ""
+                sub["started_at"] = sub.get("started_at") or ts
+                sub["ended_at"] = None
+                sub["running"] = True
+                sub["now_ts"] = ts
+                sub["ev"]["first"] = sub["ev"].get("first") or ts
+                sub["ev"]["last"] = ts
+        elif ev == "sub_stop":
+            aid = d.get("aid") or ""
+            if aid:
+                sub = hst["subagents"].setdefault(aid, {
+                    "agent_id": aid, "agent_type": "", "started_at": ts, "ended_at": ts,
+                    "running": False, "transcript": "", "last_msg": "", "now": "끝", "now_ts": ts,
+                    "ev": new_ev(),
+                })
+                sub["agent_type"] = d.get("atype") or sub.get("agent_type") or ""
+                sub["ended_at"] = ts
+                sub["running"] = False
+                if d.get("tr"):
+                    sub["transcript"] = d["tr"]
+                if d.get("last"):
+                    sub["last_msg"] = d["last"]
+                sub["now"] = "끝"
+                sub["now_ts"] = ts
+                sub["ev"]["last"] = ts
+        elif ev == "permission":
+            hst["status"] = "asking"
+            hst["status_ts"] = ts
+            hst["permission"] = d.get("msg") or "권한 확인 기다리는 중"
+        elif ev == "notify":
+            kind = d.get("kind") or ""
+            if kind == "permission_prompt":
+                hst["status"] = "asking"
+                hst["status_ts"] = ts
+                pt = hst.get("pending_tool") or {}
+                desc = pt.get("desc") or ""
+                msg = d.get("msg") or ""
+                if desc:
+                    hst["permission"] = short(f"권한 확인 기다리는 중 · {desc}", 160)
+                else:
+                    hst["permission"] = short(msg or "권한 확인 기다리는 중", 160)
+            elif kind == "elicitation_dialog":
+                hst["status"] = "asking"
+                hst["status_ts"] = ts
+                hst["asked"] = hst.get("asked") or short(d.get("msg") or "입력을 기다리는 중", 160)
+            elif kind == "idle_prompt":
+                if not hst.get("asked") and not hst.get("permission"):
+                    hst["status"] = "idle"
+                    hst["status_ts"] = ts
+        elif ev == "stop":
+            hst["status"] = "idle"
+            hst["status_ts"] = ts
+            hst["permission"] = None
+            hst["asked"] = None
+            if d.get("last"):
+                hst["last_stop_msg"] = d["last"]
+                hst["last_stop_ts"] = ts
+
+    save_state(cpath, hst)
+    return hst
+
+
+def hook_session_status(hst):
+    if not hst:
+        return ""
+    if hst.get("ended"):
+        return "ended"
+    if hst.get("permission") or hst.get("asked") or hst.get("status") == "asking":
+        return "waiting"
+    if hst.get("status") == "busy" or any(x.get("running") for x in (hst.get("subagents") or {}).values()):
+        return "busy"
+    if hst.get("status") == "idle":
+        return "idle"
+    return ""
+
+
 # ── 세션 찾기 ─────────────────────────────────────────────
 
 def pid_alive(pid):
@@ -167,6 +436,7 @@ def transcript_of(sid):
 
 def list_sessions():
     out = []
+    by_sid = {}
     for f in glob.glob(os.path.join(CLAUDE, "sessions", "*.json")):
         try:
             d = json.load(open(f))
@@ -177,7 +447,7 @@ def list_sessions():
             continue
         sid = d.get("sessionId")
         tr = transcript_of(sid) if sid else None
-        out.append({
+        item = {
             "pid": str(pid),
             "session": sid,
             "name": d.get("name") or "",
@@ -187,7 +457,64 @@ def list_sessions():
             "terminal": terminal_of(pid),
             "updated": (tr and os.path.getmtime(tr)) or (d.get("updatedAt") or 0) / 1000,
             "transcript": tr,
-        })
+            "hooked": False,
+        }
+        out.append(item)
+        if sid:
+            by_sid[sid] = item
+
+    # 훅이 기록한 세션 정보도 함께 읽는다(~/.claude/sessions 가 없는 옛 Claude Code 에서도 동작)
+    now_t = time.time()
+    for f in glob.glob(os.path.join(HOOK_SESSIONS, "*.json")):
+        try:
+            hm_ = json.load(open(f))
+        except Exception:
+            continue
+        sid = hm_.get("session_id")
+        if not sid or hm_.get("ended"):
+            continue
+        pid = hm_.get("pid")
+        if pid and not pid_alive(pid):
+            continue
+        hst = read_hook_state(sid)
+        if hst and hst.get("ended"):
+            continue
+        ev_path = os.path.join(HOOK_EVENTS, safe_sid(sid) + ".jsonl")
+        ev_mtime = os.path.getmtime(ev_path) if os.path.exists(ev_path) else 0
+        last_t = max(hm_.get("updated_at") or 0, ev_mtime)
+        if not pid and now_t - last_t > 6 * 3600:
+            continue
+        tr = hm_.get("transcript_path") or (hst and hst.get("transcript")) or transcript_of(sid)
+        term = hm_.get("terminal") or (hst and hst.get("terminal")) or (terminal_of(pid) if pid else None)
+        hstatus = hook_session_status(hst)
+        tr_mtime = os.path.getmtime(tr) if tr and os.path.exists(tr) else 0
+        updated = max(tr_mtime, last_t)
+        if sid in by_sid:
+            cur = by_sid[sid]
+            if not cur.get("terminal") and term:
+                cur["terminal"] = term
+            if not cur.get("transcript") and tr:
+                cur["transcript"] = tr
+            if hstatus and (not cur.get("status") or hstatus == "waiting"):
+                cur["status"] = hstatus
+            cur["updated"] = max(cur.get("updated") or 0, updated)
+            cur["hooked"] = True
+        else:
+            item = {
+                "pid": str(pid or ""),
+                "session": sid,
+                "name": "",
+                "named": False,
+                "status": hstatus,
+                "cwd": hm_.get("cwd") or (hst and hst.get("cwd")) or "",
+                "terminal": term,
+                "updated": updated,
+                "transcript": tr,
+                "hooked": True,
+            }
+            out.append(item)
+            by_sid[sid] = item
+
     for c in codex_procs():
         out.append({"session": "codex:" + os.path.basename(c["rollout"]), "name": "", "named": False,
                     "status": "", "cwd": "", "terminal": c["terminal"], "agent": "codex",
@@ -560,14 +887,55 @@ def model_name(mid):
     return m.group(1).capitalize() if m else ""
 
 
-def build_map(sid, tr):
+def _merge_ev(base_ev, hook_ev):
+    """대화 기록의 ev 와 훅의 ev 를 합친 새 dict 를 만든다(원본 캐시는 건드리지 않음)."""
+    ev = dict(base_ev)
+    ev["files"] = list(base_ev.get("files") or [])
+    ev["acts"] = [list(a) for a in (base_ev.get("acts") or [])]
+    if not hook_ev:
+        return ev
+    for k in ("first", "test_write", "fail", "impl"):
+        if not ev.get(k) and hook_ev.get(k):
+            ev[k] = hook_ev[k]
+    for k in ("last", "pass", "commit"):
+        if hook_ev.get(k) and (not ev.get(k) or hook_ev[k] > ev[k]):
+            ev[k] = hook_ev[k]
+    if hook_ev.get("steps") and not ev.get("steps"):
+        ev["steps"] = hook_ev["steps"]
+    if hook_ev.get("tests") and not ev.get("tests"):
+        ev["tests"] = hook_ev["tests"]
+    if hook_ev.get("commits", 0) > ev.get("commits", 0):
+        ev["commits"] = hook_ev["commits"]
+    for fn in hook_ev.get("files") or []:
+        if fn and fn not in ev["files"] and len(ev["files"]) < 40:
+            ev["files"].append(fn)
+    if hook_ev.get("acts"):
+        if not ev["acts"] or (hook_ev.get("last") or "") > (ev.get("last") or ""):
+            merged = ev["acts"] + [list(a) for a in hook_ev["acts"] if not ev["acts"] or a[0] > ev["acts"][-1][0]]
+            ev["acts"] = merged[-12:]
+    return ev
+
+
+def _agent_id_from_meta(meta, mf_path):
+    if meta.get("agentId"):
+        return str(meta["agentId"])
+    base = os.path.basename(mf_path)
+    m = re.match(r"^agent-(.+)\.meta\.json$", base)
+    return m.group(1) if m else ""
+
+
+def build_map(sid, tr, hook_state=None):
     os.makedirs(CACHE, exist_ok=True)
-    mpath, hpath = os.path.join(CACHE, sid + ".main.json"), os.path.join(CACHE, sid + ".helpers.json")
-    st = update_main(tr, load_state(mpath, {}))
-    save_state(mpath, st)
+    mpath, hpath = os.path.join(CACHE, safe_sid(sid) + ".main.json"), os.path.join(CACHE, safe_sid(sid) + ".helpers.json")
+    if tr and os.path.exists(tr):
+        st = update_main(tr, load_state(mpath, {}))
+        save_state(mpath, st)
+    else:
+        st = load_state(mpath, {})
+    st.setdefault("events", [])
     hcache = load_state(hpath, {})
 
-    sub_dir = tr[:-6] + "/subagents" if tr else None
+    sub_dir = tr[:-6] + "/subagents" if tr and tr.endswith(".jsonl") else None
     metas = {}
     if sub_dir and os.path.isdir(sub_dir):
         for mf in glob.glob(os.path.join(sub_dir, "*.meta.json")):
@@ -576,6 +944,7 @@ def build_map(sid, tr):
             except Exception:
                 continue
             meta["_jsonl"] = mf[:-10] + ".jsonl"
+            meta["_agent_id"] = _agent_id_from_meta(meta, mf)
             if meta.get("toolUseId"):
                 metas[meta["toolUseId"]] = meta
 
@@ -600,7 +969,23 @@ def build_map(sid, tr):
                 label = re.sub(r"\s*(구현\s*)?계획서\s*(작성|쓰기)?\s*", " ", desc).strip() or "계획"
                 new_phase(short(label, 40), ts)
             phases[-1]["items"].append({"id": bid, "name": desc, "kind": kind, "key": task_key(desc), "job": job, "start": ts,
-                                        "jsonl": meta.get("_jsonl"), "model": model_name(model or meta.get("pickedEffortModel"))})
+                                        "jsonl": meta.get("_jsonl"), "agent_id": meta.get("_agent_id") or "",
+                                        "model": model_name(model or meta.get("pickedEffortModel"))})
+
+    hook_subs = (hook_state or {}).get("subagents") or {}
+    hook_agent_tools = (hook_state or {}).get("agent_tools") or {}
+    matched_aids = set()
+
+    def find_hook_sub(h):
+        aid = h.get("agent_id") or ""
+        if aid and aid in hook_subs:
+            return aid, hook_subs[aid]
+        jpath = h.get("jsonl") or ""
+        if jpath:
+            for k, sub in hook_subs.items():
+                if sub.get("transcript") and sub["transcript"] == jpath:
+                    return k, sub
+        return "", None
 
     now_t = time.time()
     running_helpers = []
@@ -617,9 +1002,29 @@ def build_map(sid, tr):
                 ev = new_ev()
                 ev["first"] = ev["last"] = h["start"]
             ended = (st.get("ended") or {}).get(h["id"])
+            h_aid, hsub = find_hook_sub(h)
+            if hsub:
+                matched_aids.add(h_aid)
+                ev = _merge_ev(ev, hsub.get("ev"))
+                if hsub.get("ended_at"):
+                    ended = ended or "completed"
+                    if not ev["last"] or hsub["ended_at"] > ev["last"]:
+                        ev["last"] = hsub["ended_at"]
+                    if not ev["last_text"] and hsub.get("last_msg"):
+                        ev["last_text"] = hsub["last_msg"]
+                elif hsub.get("running") and hsub.get("now") and (not ev["last"] or (hsub.get("now_ts") or "") >= (ev["last"] or "")):
+                    ev["now"] = hsub["now"]
+            hat = hook_agent_tools.get(h["id"])
+            if hat and hat.get("done_ts"):
+                ended = ended or "completed"
             # 끝 알림이 없고 보고도 안 했으면 일하는 중(오래 걸리는 명령으로 기록이 한동안 안 바뀌어도).
+            # 훅이 도우미 시작을 잡았으면 meta/jsonl 이 덜 쌓였어도 바로 「일하는 중」으로 본다.
             # 세션이 이미 꺼졌거나 6시간 넘게 기록이 안 바뀌었으면 멈춘 것으로 본다.
             fresh = bool(h["jsonl"]) and os.path.exists(h["jsonl"]) and now_t - os.path.getmtime(h["jsonl"]) < 6 * 3600
+            if hsub and hsub.get("running") and not hsub.get("ended_at"):
+                hts = kst(hsub.get("now_ts") or hsub.get("started_at"))
+                if hts and now_t - hts.timestamp() < 6 * 3600:
+                    fresh = True
             running = (not ended) and ev["now"] != "보고하고 끝냄" and fresh and SESSION_ALIVE
             h["ended"] = ended or ""
             h["after"] = (st.get("after") or {}).get(h["id"], "")
@@ -630,11 +1035,43 @@ def build_map(sid, tr):
                      said=first_sentence(re.sub(r"(?mi)^\W*(상태|status|결과)\s*[:：].*$", "", ev.get("report") or "").strip() or ev["last_text"], 160), cells=helper_cells(h["kind"], ev, running))
             if running:
                 running_helpers.append(h)
+
+    # 대화 기록이 아직 flush 되지 않은 방금 뜬 도우미도 훅으로 바로 보여 준다
+    if SESSION_ALIVE:
+        for aid, sub in hook_subs.items():
+            if aid in matched_aids or not sub.get("running") or sub.get("ended_at"):
+                continue
+            hts = kst(sub.get("now_ts") or sub.get("started_at"))
+            if hts and now_t - hts.timestamp() >= 6 * 3600:
+                continue
+            ev = _merge_ev(new_ev(), sub.get("ev"))
+            atype = sub.get("agent_type") or ""
+            kind = helper_kind("", atype)
+            h = {
+                "id": "hook:" + aid, "agent_id": aid,
+                "name": atype or "도우미", "kind": kind, "key": None,
+                "job": "", "start": sub.get("started_at"), "end": ev.get("last"),
+                "jsonl": sub.get("transcript") or None, "model": "",
+                "ended": "", "after": "", "report": "", "running": True,
+                "now": sub.get("now") or ev.get("now") or "일하는 중",
+                "said": "", "cells": helper_cells(kind, ev, True),
+            }
+            phases[-1]["items"].append(h)
+            running_helpers.append(h)
+
     save_state(hpath, hcache)
-    first_ts, last_ts = st.get("first_ts"), st.get("last_ts")
+    first_ts = st.get("first_ts") or (hook_state and hook_state.get("first_ts"))
+    last_ts = st.get("last_ts") or (hook_state and hook_state.get("last_ts"))
+    if hook_state and hook_state.get("last_ts") and (not last_ts or hook_state["last_ts"] > last_ts):
+        last_ts = hook_state["last_ts"]
     last_words, last_words_ts, asked = st.get("words", ""), st.get("words_ts"), st.get("asked")
+    if hook_state and hook_state.get("last_stop_msg") and (not last_words_ts or (hook_state.get("last_stop_ts") or "") > last_words_ts):
+        if hangul(hook_state["last_stop_msg"]) or not last_words:
+            last_words, last_words_ts = hook_state["last_stop_msg"], hook_state.get("last_stop_ts")
     last_prompt, last_prompt_ts = st.get("prompt", ""), st.get("prompt_ts")
-    main_ev = st.get("seg") or new_ev()
+    if hook_state and hook_state.get("last_prompt") and (not last_prompt_ts or (hook_state.get("last_prompt_ts") or "") > last_prompt_ts):
+        last_prompt, last_prompt_ts = hook_state["last_prompt"], hook_state.get("last_prompt_ts")
+    main_ev = _merge_ev(st.get("seg") or new_ev(), hook_state.get("main_ev") if hook_state else None)
 
     # 할 일 카드로 묶기: 같은 덩어리 안 같은 번호
     out_phases = []
@@ -699,6 +1136,7 @@ def build_map(sid, tr):
     days = (datetime.now(KST).date() - started.date()).days + 1 if started else 0
     return {
         "session": sid, "transcript": tr,
+        "source": "hook+log" if hook_state else "log",
         "started": md(first_ts), "days": days, "helpers": sum(len(p["items"]) for p in phases),
         "status": status, "asked": asked,
         "last_words": first_sentence(last_words, 200), "last_words_at": hm(last_words_ts),
@@ -715,8 +1153,8 @@ def build_map(sid, tr):
     }
 
 
-def cached_map(sid, tr):
-    return build_map(sid, tr)
+def cached_map(sid, tr, hook_state=None):
+    return build_map(sid, tr, hook_state=hook_state)
 
 
 def direct_card(tn, live=False):
@@ -800,8 +1238,8 @@ def bind_turns(m, live_working):
             c["turns"].sort(key=lambda t: t.get("ts") or "")
 
 
-def overlay_live(m, live):
-    """세션 파일의 지금 상태(busy · waiting · idle)를 덧씌우고, 세션이 직접 일하는 중이면 카드 하나를 더한다."""
+def overlay_live(m, live, hook_state=None):
+    """세션 파일과 훅의 지금 상태(busy · waiting · idle)를 덧씌운다."""
     if live == "busy":
         m["status"] = "working"
     elif live == "waiting":
@@ -809,6 +1247,31 @@ def overlay_live(m, live):
         m["asked"] = m.get("asked") or "확인 · 허락을 기다리는 중"
     elif live in ("idle", "shell", ""):
         m["status"] = "asking" if m.get("asked") else "idle"
+
+    if hook_state and SESSION_ALIVE:
+        if hook_state.get("permission"):
+            m["status"] = "asking"
+            m["asked"] = hook_state["permission"]
+        elif hook_state.get("asked"):
+            m["status"] = "asking"
+            m["asked"] = hook_state["asked"]
+        elif hook_state.get("status") == "busy":
+            m["status"] = "working"
+            m["asked"] = None
+            if hook_state.get("now"):
+                d_ = m.setdefault("direct", {})
+                dev = dict(d_.get("ev") or {})
+                if not dev.get("last") or (hook_state.get("now_ts") or "") >= (dev.get("last") or ""):
+                    dev["now"] = hook_state["now"]
+                    d_["ev"] = dev
+        elif hook_state.get("status") == "idle":
+            helper_running = any(h for h in (m.get("now") or []) if h.get("name") != "세션이 직접")
+            if helper_running:
+                m["status"] = "working"
+            else:
+                m["asked"] = None
+                m["status"] = "idle"
+
     if m.get("turns") and m["status"] == "working":
         m["turns"][-1]["state"] = "working"
     d = m.get("direct") or {}
@@ -993,16 +1456,17 @@ def main(argv):
     if len(argv) < 2 or argv[1] not in ("list", "map"):
         print(__doc__)
         return 2
-    # 14일 넘게 안 쓴 읽기 기록은 지운다(쌓이지 않게)
-    for f in glob.glob(os.path.join(CACHE, "*.json")):
-        try:
-            if time.time() - os.path.getmtime(f) > 14 * 86400:
-                os.remove(f)
-        except OSError:
-            pass
+    # 14일 넘게 안 쓴 읽기 · 훅 기록은 지운다(쌓이지 않게)
+    for pat in (os.path.join(CACHE, "*.json"), os.path.join(HOOK_SESSIONS, "*.json"), os.path.join(HOOK_EVENTS, "*.jsonl")):
+        for f in glob.glob(pat):
+            try:
+                if time.time() - os.path.getmtime(f) > 14 * 86400:
+                    os.remove(f)
+            except OSError:
+                pass
     sessions = list_sessions()
     if argv[1] == "list":
-        print(json.dumps([{k: s.get(k) for k in ("session", "name", "named", "status", "terminal", "updated", "cwd", "agent")}
+        print(json.dumps([{k: s.get(k) for k in ("session", "name", "named", "status", "terminal", "updated", "cwd", "agent", "hooked")}
                           for s in sessions], ensure_ascii=False))
         return 0
     sid = term = None
@@ -1014,8 +1478,11 @@ def main(argv):
     if "--codex-file" in argv and not s:
         s = {"session": "codex:file", "name": "", "terminal": None, "transcript": argv[argv.index("--codex-file") + 1], "cwd": "", "agent": "codex"}
     if not s and sid:
-        s = {"session": sid, "name": "", "terminal": None, "transcript": transcript_of(sid), "cwd": "", "named": False}
-    if not s or not s.get("transcript"):
+        hst = read_hook_state(sid)
+        s = {"session": sid, "name": "", "terminal": hst.get("terminal") if hst else None,
+             "transcript": (hst.get("transcript") if hst else None) or transcript_of(sid),
+             "cwd": hst.get("cwd", "") if hst else "", "named": False, "hooked": bool(hst)}
+    if not s or (not s.get("transcript") and not s.get("hooked")):
         print(json.dumps({"error": "no-session", "terminal": term, "session": sid}, ensure_ascii=False))
         return 0
     global SESSION_ALIVE
@@ -1030,8 +1497,9 @@ def main(argv):
         m.update(name=s.get("name") or "", named=False, terminal=s.get("terminal"), cwd=s.get("cwd"))
         print(json.dumps(m, ensure_ascii=False))
         return 0
-    m = cached_map(s["session"], s["transcript"])
-    overlay_live(m, s.get("status") or "")
+    hook_state = read_hook_state(s["session"])
+    m = cached_map(s["session"], s.get("transcript"), hook_state=hook_state)
+    overlay_live(m, s.get("status") or "", hook_state=hook_state)
     helper_running = any(h for h in (m.get("now") or []) if h.get("name") != "세션이 직접")
     bind_turns(m, m.get("status") == "working" and not helper_running)
     m.pop("turns", None)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""진행 지도 프로토타입 — Claude Code 대화 기록 파일을 읽어 세션 하나의 지도 자료(JSON)를 만든다.
+"""where was i 프로토타입 — Claude Code 대화 기록 파일을 읽어 세션 하나의 지도 자료(JSON)를 만든다.
 
 프로토타입이다. 설계서의 「지난 기록 채우기」 부분만 먼저 만든 것이고, 훅 기록은 다음 단계다.
 쓰는 법:
@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 HOME = os.path.expanduser("~")
 CLAUDE = os.path.join(HOME, ".claude")
 KST = timezone(timedelta(hours=9))
-CACHE = os.path.join(HOME, ".cache", "progress-map")
+CACHE = os.path.join(HOME, ".cache", "where-was-i")
 RUNNING_SEC = 120  # 도우미 기록이 이 안에 바뀌었으면 「일하는 중」
 
 TEST_FILE = re.compile(r"(_test\.|\.test\.|\.spec\.|/tests?/|test_[^/]*\.py$)")
@@ -150,11 +150,15 @@ def helper_kind(desc, agent_type):
 
 
 def read_helper(jsonl):
-    """도우미 기록에서 흔적을 모은다: 시험 쓰기 · 실패 · 구현 · 통과 · 커밋 · 마지막 행동."""
+    return scan_lines(iter_jsonl(jsonl))
+
+
+def scan_lines(lines):
+    """기록 줄들에서 흔적을 모은다: 시험 쓰기 · 실패 · 구현 · 통과 · 커밋 · 마지막 행동."""
     ev = {"first": None, "last": None, "test_write": None, "fail": None, "impl": None, "pass": None,
           "commit": None, "steps": None, "now": "", "last_text": "", "tools": 0}
     pending = {}
-    for d in iter_jsonl(jsonl):
+    for d in lines:
         ts = d.get("timestamp")
         if ts:
             ev["first"] = ev["first"] or ts
@@ -184,7 +188,7 @@ def read_helper(jsonl):
                         ev["now"] = f"{base} 고치는 중"
                 elif name == "Bash":
                     c = inp.get("command", "")
-                    sm = re.search(r":\s*progress-step\s+(plan|now|done)\s*(.*?)(?:&&|;|\n|$)", c)
+                    sm = re.search(r":\s*wwi-step\s+(plan|now|done)\s*(.*?)(?:&&|;|\n|$)", c)
                     if sm:
                         ev["steps"] = ev["steps"] or {"plan": [], "now": 0}
                         if sm.group(1) == "plan":
@@ -284,6 +288,7 @@ def build_map(sid, tr):
     last_words, last_words_ts = "", None
     asked = None
     seen_ids = set()
+    main_seg, last_prompt, last_prompt_ts = [], "", None
 
     def new_phase(name, ts, src=""):
         cur = phases[-1]
@@ -308,7 +313,9 @@ def build_map(sid, tr):
             s = content.lstrip()
             if s and not s.startswith(("<", "[SYSTEM", "Another Claude", "Caveat:", "[Request interrupted")):
                 asked = None
+                main_seg, last_prompt, last_prompt_ts = [], s, ts
             continue
+        main_seg.append(d)
         if not isinstance(content, list):
             continue
         for b in content:
@@ -425,6 +432,8 @@ def build_map(sid, tr):
                 for h in running_helpers],
         "phases": out_phases,
         "built": datetime.now(KST).strftime("%H:%M:%S"),
+        "direct": {"prompt": first_sentence(last_prompt, 90), "since": hm(last_prompt_ts), "since_ts": last_prompt_ts,
+                   "ev": scan_lines(main_seg)},
     }
 
 
@@ -448,6 +457,35 @@ def cached_map(sid, tr):
     return m
 
 
+def overlay_live(m, live):
+    """세션 파일의 지금 상태(busy · waiting · idle)를 덧씌우고, 세션이 직접 일하는 중이면 카드 하나를 더한다."""
+    if live == "busy":
+        m["status"] = "working"
+    elif live == "waiting":
+        m["status"] = "asking"
+        m["asked"] = m.get("asked") or "확인 · 허락을 기다리는 중"
+    elif live in ("idle", "shell", ""):
+        m["status"] = "asking" if m.get("asked") else "idle"
+    d = m.get("direct") or {}
+    if m["status"] != "working" or m.get("now"):
+        return
+    ev = d.get("ev") or {}
+    cells = helper_cells("구현", ev, True) if (ev.get("test_write") or ev.get("fail") or ev.get("pass")) else [["일하는 중", "working", "", "짐작"]]
+    since = kst(d.get("since_ts"))
+    mins = int((datetime.now(KST) - since).total_seconds() // 60) if since else 0
+    card = {"key": None, "title": "세션이 직접 하는 일", "state": "working", "time": f'{d.get("since", "")} ~',
+            "cells": cells, "done_text": "", "direct": True,
+            "helpers": [{"kind": "세션", "name": "세션이 직접", "job": d.get("prompt", ""), "state": "working",
+                         "time": f'{d.get("since", "")} ~', "cells": cells, "now": ev.get("now") or "생각하는 중", "said": ""}]}
+    m["now"] = [{"name": "세션이 직접", "now": ev.get("now") or "생각하는 중", "mins": mins}]
+    if not m["phases"]:
+        m["phases"].append({"name": "지금", "date": md(d.get("since_ts")), "goal": "", "src": "", "total": 0, "done": 0, "state": "working", "cards": []})
+    ph = m["phases"][-1]
+    ph["cards"].append(card)
+    ph["total"] += 1
+    ph["state"] = "working"
+
+
 def main(argv):
     if len(argv) < 2 or argv[1] not in ("list", "map"):
         print(__doc__)
@@ -469,6 +507,7 @@ def main(argv):
         print(json.dumps({"error": "no-session", "terminal": term, "session": sid}, ensure_ascii=False))
         return 0
     m = cached_map(s["session"], s["transcript"])
+    overlay_live(m, s.get("status") or "")
     m.update(name=s.get("name") or "", named=s.get("named"), terminal=s.get("terminal"), cwd=s.get("cwd"))
     print(json.dumps(m, ensure_ascii=False))
     return 0

@@ -1,11 +1,19 @@
-// 진행 지도 프로토타입 — herdr 오른쪽 칸.
+// where was i 프로토타입 — herdr 오른쪽 칸.
 // 지금 보는 터미널(또는 고른 세션)의 Claude 세션 지도를 그린다. 자료는 pmap.py 가 만든다.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, focused, theme, home, checking } from "herdr";
+import { exec, focused, theme, home, checking, agents } from "herdr";
 
-const SCRIPT = () => `${home()}/Documents/progress-map/pmap.py`;
-const KIND = { 구현: "구현", 검토: "검토", 고침: "고침", 조사: "조사", 계획: "계획" };
+const SCRIPT = () => `${home()}/Documents/where-was-i/pmap.py`;
+// 세션 이름은 herdr 탭 이름을 먼저 쓴다
+const tabName = (term) => {
+  const a = term && agents().find((x) => x.address === term);
+  if (!a) return "";
+  const title = String(a.title || "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
+  if (a.tab_name && a.tab_name !== "Claude Code") return a.tab_name;
+  return title || a.tab_name || "";
+};
+const KIND = { 구현: "구현", 검토: "검토", 고침: "고침", 조사: "조사", 계획: "계획", 세션: "세션" };
 
 export default class ProgressMap extends View {
   init(_props, cx) {
@@ -74,7 +82,7 @@ export default class ProgressMap extends View {
     const done = list.filter((c) => c[1] === "done").length;
     const cur = list.find((c) => c[1] === "working");
     const guess = list.some((c) => c[3] === "짐작");
-    const txt = cur ? `${cur[0]} 중 · ${done}/${list.length}` : `${list.length}칸 끝`;
+    const txt = cur ? `${cur[0]}${cur[0].endsWith("중") ? "" : " 중"} · ${done}/${list.length}` : `${list.length}칸 끝`;
     return div().text_size(11).text_color(t.dim).child(txt + (guess ? " · 짐작" : ""));
   }
 
@@ -88,7 +96,7 @@ export default class ProgressMap extends View {
   }
 
   header(d, t, cx) {
-    const name = d.name || "(이름 없는 세션)";
+    const name = tabName(d.terminal) || d.name || "(이름 없는 세션)";
     const nowLine = d.now && d.now.length
       ? `${d.now.length}명 일하는 중: ${d.now[0].name} · ${d.now[0].now} · ${d.now[0].mins}분째`
       : "일하는 도우미 없음";
@@ -121,7 +129,7 @@ export default class ProgressMap extends View {
         .on_click((_e, cx) => { this.pick = s.session; this.picking = false; this.phase = null; this.open = {}; this.refresh(cx); cx.notify(); })
         .children([
           div().w(36).text_size(11).text_color(t.dim).child(s.terminal || ""),
-          div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(s.name || s.session.slice(0, 8)),
+          div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(tabName(s.terminal) || s.name || s.session.slice(0, 8)),
           div().text_size(11).text_color(s.status === "busy" ? t.working : t.dim).child(s.status === "busy" ? "일하는 중" : s.status === "waiting" ? "기다림" : ""),
         ])),
     ];

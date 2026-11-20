@@ -46,17 +46,14 @@ export default class WhereWasI extends View {
     this.phase = null;
     this.open = {};
     this.busy = false;
-    this.turnsOpen = {};   // 덩어리마다 「지시 · 한 일」 펼침
+    this.convOpen = {};    // 카드마다 「대화」 펼침
     this.turnOpen = {};    // 지시 카드 하나 전체 보기
     if (checking()) return;
-    // herdr 명령: where-was-i.toggle — 지금 단계의 「지시 · 한 일」 펼치기 · 접기(단축키로도 쓸 수 있다)
+    // herdr 명령: where-was-i.toggle — 펼친 대화를 모두 접기
     cx.spawn(async (cx) => {
       for (;;) {
         const c = await nextCommand();
-        if (c === "toggle" && this.data) {
-          const i = this.phase ?? Math.max(0, (this.data.phases || []).length - 1);
-          this.turnsOpen[i] = !this.turnsOpen[i];
-        }
+        if (c === "toggle") this.convOpen = {};
         cx.notify();
       }
     });
@@ -327,6 +324,22 @@ export default class WhereWasI extends View {
       .on_click((_e, cx) => { this.open[id] = !open; cx.notify(); })
       .children(parts);
     const kids = [box];
+    const turns = k.turns || [];
+    if (turns.length) {
+      const co = !!this.convOpen[id];
+      const lastT = turns[turns.length - 1];
+      kids.push(h_flex().id(`conv-${id}`).items_center().gap(6).mx(10).px(8).py(4)
+        .rounded_b(8).border(1).border_t(0).border_color(t.border).bg(t.chrome).hover((x) => x.bg(t.raised))
+        .on_click((_e, cx) => { this.convOpen[id] = !co; cx.notify(); })
+        .children([
+          svg(ICON(co ? "chevron-down" : "chevron-right")).size(11).text_color(t.muted),
+          div().text_size(11).font_semibold().text_color(t.muted).child(`대화 ${turns.length}개`),
+          div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim)
+            .child(co ? "" : `마지막 「${lastT.said.replace(/\s+/g, " ").slice(0, 24)}${lastT.said.length > 24 ? "…" : ""}」`),
+        ]));
+      if (co) kids.push(v_flex().gap(5).pl(14).pt(5).children(
+        turns.map((tn, j) => [tn, j]).reverse().map(([tn, j]) => this.turnCard(tn, `${id}-${j}`, t))));
+    }
     if (open) {
       kids.push(v_flex().gap(5).pl(14).pt(6).children([
         ...(k.after ? [v_flex().gap(2).p(8).rounded(7).bg(t.raised).children([this.label("세션이 박정욱 님께 한 말", t), div().text_size(12).text_color(t.foreground).child(k.after)])] : []),
@@ -409,23 +422,6 @@ export default class WhereWasI extends View {
         ]),
         p.goal ? div().text_size(12).text_color(t.muted).child(p.goal) : div(),
       ]));
-      const turns = p.turns || [];
-      if (turns.length) {
-        const open = !!this.turnsOpen[idx];
-        parts.push(v_flex().gap(6).children([
-          h_flex().id(`turns-${idx}`).items_center().gap(6).px(8).py(6).rounded(7).border(1).border_color(t.border)
-            .hover((x) => x.bg(t.raised))
-            .on_click((_e, cx) => { this.turnsOpen[idx] = !open; cx.notify(); })
-            .children([
-              svg(ICON(open ? "chevron-down" : "chevron-right")).size(12).text_color(t.muted),
-              div().text_size(12).font_semibold().text_color(t.foreground).child(`이 단계의 지시 · 한 일 ${turns.length}개`),
-              div().flex_1(),
-              div().text_size(11).text_color(t.dim).child(open ? "접기" : `마지막 「${turns[turns.length - 1].said.slice(0, 14)}${turns[turns.length - 1].said.length > 14 ? "…" : ""}」`),
-            ]),
-          // 최근 지시가 위로(내림차순)
-          open ? v_flex().gap(5).children(turns.map((tn, j) => [tn, j]).reverse().map(([tn, j]) => this.turnCard(tn, `${idx}-${j}`, t))) : div(),
-        ]));
-      }
       const nodes = [];
       // 최근 할 일이 위로(내림차순). 펼침 상태는 원래 번호로 기억한다.
       p.cards.map((k, i) => [k, i]).reverse().forEach(([k, i], n) => {

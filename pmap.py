@@ -403,7 +403,9 @@ def turn_out(tn, live):
             "kind": tn.get("kind", ""), "asked": tn.get("asked", ""), "first": tn.get("first", ""),
             "last": short(" ".join(sents[:2]) if sents else last, 200), "last_time": hm(tn.get("last_ts")),
             "helpers": tn.get("helpers", []), "files": ev.get("files", []), "commits": ev.get("commits", 0),
-            "tests": ev.get("tests", ""), "acts": acts, "state": "working" if live else "done"}
+            "tests": ev.get("tests", ""), "acts": acts, "state": "working" if live else "done",
+            "hids": tn.get("hids", []), "work": bool(ev.get("files") or ev.get("commits") or ev.get("tests")),
+            "acts_full": [[a[0], past(a[1])] for a in (ev.get("acts") or [])][-6:]}
 
 
 def iter_new_lines(path, st, chunk=4 << 20):
@@ -535,6 +537,7 @@ def update_main(tr, st):
                 agent_ids.add(b.get("id"))
                 if st.get("turns"):
                     st["turns"][-1]["helpers"].append(inp.get("description") or "")
+                    st["turns"][-1].setdefault("hids", []).append(b.get("id"))
                 st["events"].append(["agent", ts, b.get("id"), inp.get("description") or "", inp.get("subagent_type") or "",
                                      first_sentence(re.sub(r"^너는[^.]*?\.\s*", "", inp.get("prompt") or ""), 150),
                                      inp.get("model") or ""])
@@ -678,6 +681,7 @@ def build_map(sid, tr):
                 "key": c["key"], "title": c["title"], "state": c["state"],
                 "time": f'{hm(c["start"])} ~ {"" if c["running"] else hm(c["end"])}',
                 "cells": c["cells"], "done_text": c["done_text"], "after": c.get("after", ""),
+                "hids": [x["id"] for x in c["helpers"]], "start_ts": c["start"],
                 "helpers": [{
                     "kind": x["kind"], "name": x["name"], "job": x["job"], "model": x.get("model", ""), "report": clean_md(x.get("report", ""), 320), "state": "working" if x["running"] else "done",
                     "time": f'{hm(x["start"])} ~ {"" if x["running"] else hm(x["end"])}',
@@ -713,24 +717,85 @@ def cached_map(sid, tr):
     return build_map(sid, tr)
 
 
-def attach_turns(m):
-    """지시(차례)를 시각으로 덩어리에 나눠 붙인다. 첫 덩어리 앞의 지시는 첫 덩어리로."""
+def direct_card(tn, live=False):
+    """세션이 도우미 없이 직접 한 지시 → 카드 하나."""
+    title = tn["said"] if not tn["short"] else (tn.get("asked") or tn.get("first") or tn["said"])
+    acts = tn.get("acts_full") or []
+    if live:
+        cells = [[a[1], "done", hm(a[0]), "기록"] for a in acts[:-1]] + ([[acts[-1][1], "working", hm(acts[-1][0]), "기록"]] if acts else [["일하는 중", "working", "", "기록"]])
+    else:
+        cells = [[a[1], "done", hm(a[0]), "기록"] for a in acts] or [["답", "done", tn.get("last_time", ""), "기록"]]
+    return {"key": None, "title": first_sentence(title, 70), "state": "working" if live else "done",
+            "time": f'{tn["time"]} ~ {"" if live else tn.get("last_time", "")}', "cells": cells,
+            "done_text": tn.get("last", ""), "after": "", "hids": [], "start_ts": tn.get("ts"), "direct": True,
+            "helpers": [{"kind": "세션", "name": "세션이 직접", "job": first_sentence(title, 150), "model": "", "report": "",
+                         "state": "working" if live else "done", "time": tn["time"], "cells": cells,
+                         "now": (cells[-1][0] if live else "끝"), "said": ""}],
+            "turns": []}
+
+
+def bind_turns(m, live_working):
+    """대화(지시)를 그때의 작업 카드에 묶는다.
+    작업을 시작시킨 지시 → 그 카드, 세션이 직접 일한 지시 → 새 「세션이 직접 한 일」 카드,
+    일 없이 묻고 답한 지시 → 그때 가장 최근에 시작된 카드(없으면 다음 카드)."""
     phases, turns = m.get("phases") or [], m.get("turns") or []
-    if not phases:
-        if turns:
-            m["phases"] = [{"name": "지시", "start_ts": None, "date": turns[0]["date"], "goal": "", "src": "", "total": 0,
-                            "done": 0, "state": "working" if m.get("status") == "working" else "done", "cards": [], "turns": turns}]
-        return
-    starts = [kst(p.get("start_ts")) for p in phases]
     for p in phases:
-        p["turns"] = []
-    for tn in turns:
-        t = kst(tn.get("ts"))
-        idx = 0
+        for c in p["cards"]:
+            c.setdefault("turns", [])
+    by_hid = {}
+    for p in phases:
+        for c in p["cards"]:
+            for h in c.get("hids", []):
+                by_hid[h] = c
+    starts = [kst(p.get("start_ts")) for p in phases]
+
+    def phase_of(ts):
+        t, idx = kst(ts), 0
         for i, st_ in enumerate(starts):
             if st_ and t and st_ <= t:
                 idx = i
-        phases[idx]["turns"].append(tn)
+        return idx
+
+    timeline = sorted([(kst(c.get("start_ts")) or datetime.min.replace(tzinfo=KST), c) for p in phases for c in p["cards"]],
+                      key=lambda x: x[0])
+    pre = []
+    for i, tn in enumerate(turns):
+        last = i == len(turns) - 1
+        card = next((by_hid[h] for h in tn.get("hids", []) if h in by_hid), None)
+        if not card and (tn.get("work") or (last and live_working)):
+            card = direct_card(tn, live=last and live_working)
+            if not phases:
+                phases.append({"name": "지시", "start_ts": tn.get("ts"), "date": tn["date"], "goal": "", "src": "",
+                               "total": 0, "done": 0, "state": "done", "cards": []})
+                starts.append(kst(tn.get("ts")))
+            ph = phases[phase_of(tn.get("ts"))]
+            ph["cards"].append(card)
+            ph["total"] += 1
+            if card["state"] == "done":
+                ph["done"] += 1
+            else:
+                ph["state"] = "working"
+            timeline.append((kst(tn.get("ts")) or datetime.min.replace(tzinfo=KST), card))
+            timeline.sort(key=lambda x: x[0])
+        if not card:
+            t = kst(tn.get("ts"))
+            before = [c for (ct, c) in timeline if t and ct <= t]
+            card = before[-1] if before else None
+        if card is None:
+            pre.append(tn)
+        else:
+            card["turns"].append(tn)
+    if pre:
+        first = timeline[0][1] if timeline else None
+        if first is None:
+            first = direct_card(pre[-1])
+            phases.append({"name": "지시", "start_ts": pre[0].get("ts"), "date": pre[0]["date"], "goal": "", "src": "",
+                           "total": 1, "done": 1, "state": "done", "cards": [first]})
+        first["turns"] = pre + first["turns"]
+    for p in phases:
+        p["cards"].sort(key=lambda c: c.get("start_ts") or "")
+        for c in p["cards"]:
+            c["turns"].sort(key=lambda t: t.get("ts") or "")
 
 
 def overlay_live(m, live):
@@ -745,6 +810,12 @@ def overlay_live(m, live):
     if m.get("turns") and m["status"] == "working":
         m["turns"][-1]["state"] = "working"
     d = m.get("direct") or {}
+    if m["status"] == "working" and not m.get("now"):
+        ev = d.get("ev") or {}
+        since = kst(d.get("since_ts"))
+        m["now"] = [{"name": "세션이 직접", "now": ev.get("now") or "생각하는 중",
+                     "mins": int((datetime.now(KST) - since).total_seconds() // 60) if since else 0}]
+    return
     if m["status"] != "working" or m.get("now"):
         return
     ev = d.get("ev") or {}
@@ -950,13 +1021,17 @@ def main(argv):
     if s.get("agent") == "codex" or str(s.get("session", "")).startswith("codex:") or "--codex-file" in argv:
         path = argv[argv.index("--codex-file") + 1] if "--codex-file" in argv else s["transcript"]
         m = build_codex_map(path, SESSION_ALIVE and "--codex-file" not in argv)
-        attach_turns(m)
+        for p_ in m.get("phases") or []:
+            for c_, t_ in zip(p_["cards"], m.get("turns") or []):
+                c_["turns"] = [t_]
+        m.pop("turns", None)
         m.update(name=s.get("name") or "", named=False, terminal=s.get("terminal"), cwd=s.get("cwd"))
         print(json.dumps(m, ensure_ascii=False))
         return 0
     m = cached_map(s["session"], s["transcript"])
     overlay_live(m, s.get("status") or "")
-    attach_turns(m)
+    helper_running = any(h for h in (m.get("now") or []) if h.get("name") != "세션이 직접")
+    bind_turns(m, m.get("status") == "working" and not helper_running)
     m.pop("turns", None)
     m.update(name=s.get("name") or "", named=s.get("named"), terminal=s.get("terminal"), cwd=s.get("cwd"))
     print(json.dumps(m, ensure_ascii=False))

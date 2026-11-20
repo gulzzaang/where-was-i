@@ -719,7 +719,7 @@ def cached_map(sid, tr):
 
 def direct_card(tn, live=False):
     """세션이 도우미 없이 직접 한 지시 → 카드 하나."""
-    title = tn["said"] if not tn["short"] else (tn.get("asked") or tn.get("first") or tn["said"])
+    title = tn["said"] if not tn["short"] else (tn.get("first") or tn.get("asked") or tn["said"])
     acts = tn.get("acts_full") or []
     if live:
         cells = [[a[1], "done", hm(a[0]), "기록"] for a in acts[:-1]] + ([[acts[-1][1], "working", hm(acts[-1][0]), "기록"]] if acts else [["일하는 중", "working", "", "기록"]])

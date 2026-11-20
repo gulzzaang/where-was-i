@@ -478,7 +478,7 @@ def update_main(tr, st):
                 done_ids.clear()
         if d.get("type") == "user" and isinstance(content, str) and not d.get("isMeta"):
             x = content.lstrip()
-            if x and not x.startswith(("<", "[SYSTEM", "Another Claude", "Caveat:", "[Request interrupted", "This session is being continued")) and not d.get("isCompactSummary"):
+            if x and not x.startswith(("<", "[SYSTEM", "Another Claude", "Caveat:", "[Request interrupted", "This session is being continued", "The user doesn")) and not d.get("isCompactSummary"):
                 st["asked"] = None
                 st["prompt"], st["prompt_ts"], st["seg"] = x[:400], ts, new_ev()
                 open_turn(st, ts, x[:400], ask_context(st.get("last_ai", "")), "")

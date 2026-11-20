@@ -34,6 +34,32 @@ RESEARCH = re.compile(r"(조사|파악|설계|대조|Explore|찾기)", re.I)
 PLAN_DESC = re.compile(r"계획서")
 
 
+def hangul(s):
+    s = str(s or "")
+    h = len(re.findall(r"[가-힣]", s))
+    return h >= 8 and h >= len(re.findall(r"[A-Za-z]", s)) * 0.4
+
+
+def clean_md(s, n=420):
+    """표 · 머리표 · 굵게를 걷고 읽기 쉬운 줄글로."""
+    out = []
+    for line in str(s or "").splitlines():
+        L = line.strip()
+        if not L or L.startswith("|") or re.match(r"^[-:| ]+$", L) or L.startswith("```"):
+            continue
+        L = re.sub(r"^#+\s*", "", L)
+        L = re.sub(r"^[-*]\s+", "· ", L)
+        L = re.sub(r"\*\*|`", "", L)
+        out.append(L)
+    t = " ".join(out)
+    return t if len(t) <= n else t[: n - 1] + "…"
+
+
+def past(now):
+    return (str(now).replace("돌리는 중", "돌림").replace("고치는 중", "고침").replace("쓰는 중", "씀")
+            .replace("읽는 중", "읽음").replace("커밋하는 중", "커밋").replace("보고하고 끝냄", "보고"))
+
+
 def kst(ts):
     if not ts:
         return None
@@ -155,7 +181,7 @@ def read_helper(jsonl):
 
 def new_ev():
     return {"first": None, "last": None, "test_write": None, "fail": None, "impl": None, "pass": None,
-            "commit": None, "steps": None, "now": "", "last_text": "", "tools": 0, "_pending": {}}
+            "commit": None, "steps": None, "now": "", "last_text": "", "tools": 0, "_pending": {}, "acts": []}
 
 
 def scan_lines(lines, ev=None):
@@ -177,6 +203,7 @@ def scan_lines(lines, ev=None):
                 ev["last_text"] = b["text"]
             elif t == "tool_use":
                 ev["tools"] += 1
+                before = ev["now"]
                 name, inp = b.get("name"), b.get("input") or {}
                 if name in ("Edit", "Write", "MultiEdit"):
                     p = inp.get("file_path", "")
@@ -221,6 +248,11 @@ def scan_lines(lines, ev=None):
                 elif name == "SubagentHandback":
                     ev["now"] = "보고하고 끝냄"
                     ev["report"] = str(inp.get("message") or "")[:1200]
+                if ev["now"] and (ev["now"] != before or not ev["acts"]):
+                    acts = ev.setdefault("acts", [])
+                    if not acts or acts[-1][1] != ev["now"]:
+                        acts.append([ts, ev["now"]])
+                        del acts[:-12]
             elif t == "tool_result":
                 kind = pending.pop(b.get("tool_use_id"), None)
                 if not kind:
@@ -323,6 +355,8 @@ def update_main(tr, st):
         lines, st["offset"], _ = read_new_lines(tr, 0)
     st.setdefault("events", [])
     seen = set(st.get("seen", []))
+    agent_ids = set(e[2] for e in st["events"] if e[0] == "agent")
+    done_ids = []
     for d in lines:
         ts = d.get("timestamp")
         if ts:
@@ -330,6 +364,28 @@ def update_main(tr, st):
             st["last_ts"] = ts
         m = d.get("message") or {}
         content = m.get("content")
+        att = d.get("attachment") if d.get("type") == "attachment" else None
+        if isinstance(att, dict) and "<task-notification>" in str(att.get("prompt") or ""):
+            for m3 in re.finditer(r"<tool-use-id>([^<]+)</tool-use-id>[\s\S]{0,800}?<status>completed</status>", str(att["prompt"])):
+                if m3.group(1) in agent_ids:
+                    done_ids.append(m3.group(1))
+        if d.get("type") in ("user", "attachment"):
+            note = content if isinstance(content, str) else ""
+            if isinstance(content, list):
+                for b in content:
+                    if b.get("type") == "tool_result" and b.get("tool_use_id") in agent_ids:
+                        r = text_of(b.get("content"))
+                        if "Async agent launched" not in r and "launched successfully" not in r:
+                            done_ids.append(b.get("tool_use_id"))
+                    elif b.get("type") == "text":
+                        note += b.get("text", "")
+            for m3 in re.finditer(r"<tool-use-id>([^<]+)</tool-use-id>[\s\S]{0,800}?<status>completed</status>", note):
+                if m3.group(1) in agent_ids:
+                    done_ids.append(m3.group(1))
+            if done_ids:
+                w = st.setdefault("waiting_after", [])
+                w.extend(i for i in done_ids if i not in w and i not in st.get("after", {}))
+                done_ids.clear()
         if d.get("type") == "user" and isinstance(content, str) and not d.get("isMeta"):
             x = content.lstrip()
             if x and not x.startswith(("<", "[SYSTEM", "Another Claude", "Caveat:", "[Request interrupted")):
@@ -342,7 +398,15 @@ def update_main(tr, st):
         for b in content:
             t = b.get("type")
             if t == "text" and d.get("type") == "assistant" and b.get("text", "").strip():
-                st["words"], st["words_ts"] = b["text"][:1200], ts
+                txt = b["text"]
+                if hangul(txt):
+                    st["words"], st["words_ts"] = txt[:1200], ts
+                    # 도우미가 끝난 뒤 세션이 처음 쓴 한국어 글 = 그 도우미 일의 쉬운 설명
+                    for aid in st.get("waiting_after", []):
+                        st.setdefault("after", {})[aid] = txt[:1500]
+                    st["waiting_after"] = []
+                elif not st.get("words"):
+                    st["words"], st["words_ts"] = txt[:1200], ts
             if t != "tool_use" or b.get("name") not in RELEVANT or b.get("id") in seen:
                 continue
             seen.add(b.get("id"))
@@ -359,6 +423,7 @@ def update_main(tr, st):
                 qs = inp.get("questions") or []
                 st["asked"] = short(qs[0].get("question") if qs else "질문", 120)
             elif name == "Agent":
+                agent_ids.add(b.get("id"))
                 st["events"].append(["agent", ts, b.get("id"), inp.get("description") or "", inp.get("subagent_type") or "",
                                      first_sentence(re.sub(r"^너는[^.]*?\.\s*", "", inp.get("prompt") or ""), 150),
                                      inp.get("model") or ""])
@@ -437,6 +502,8 @@ def build_map(sid, tr):
                 ev["first"] = ev["last"] = h["start"]
             running = (bool(h["jsonl"]) and os.path.exists(h["jsonl"]) and now_t - os.path.getmtime(h["jsonl"]) < RUNNING_SEC
                        and ev["now"] != "보고하고 끝냄")
+            h["after"] = (st.get("after") or {}).get(h["id"], "")
+            h["report"] = ev.get("report", "")
             h.update(running=running, end=ev["last"], now=ev["now"] or ("일하는 중" if running else "끝"),
                      said=first_sentence(re.sub(r"(?mi)^\W*(상태|status|결과)\s*[:：].*$", "", ev.get("report") or "").strip() or ev["last_text"], 160), cells=helper_cells(h["kind"], ev, running))
             if running:
@@ -472,7 +539,14 @@ def build_map(sid, tr):
             for x in hs:
                 c["cells"] += x["cells"]
             c["state"] = "working" if c["running"] else "done"
-            c["done_text"] = hs[-1]["said"]
+            aft = next((x["after"] for x in reversed(hs) if x.get("after")), "")
+            if aft:
+                cm = clean_md(aft, 600)
+                sents = re.findall(r".+?(?:[.!?。]|니다|어요|해요)(?=\s|$)", cm)
+                c["done_text"] = short(" ".join(sents[:2]) if sents else cm, 150)
+            else:
+                c["done_text"] = hs[-1]["said"]
+            c["after"] = clean_md(aft, 520)
             # 이름에서 번호 뗀 뒤 구현 도우미 이름을 제목으로
             impl = next((x for x in hs if x["kind"] not in ("검토",)), hs[0])
             c["title"] = re.sub(r"^\s*\d*[A-Z]?\s*(Task\s*|T)\S+\s*", "", impl["name"]).strip() or impl["name"]
@@ -485,9 +559,9 @@ def build_map(sid, tr):
             "cards": [{
                 "key": c["key"], "title": c["title"], "state": c["state"],
                 "time": f'{hm(c["start"])} ~ {"" if c["running"] else hm(c["end"])}',
-                "cells": c["cells"], "done_text": c["done_text"],
+                "cells": c["cells"], "done_text": c["done_text"], "after": c.get("after", ""),
                 "helpers": [{
-                    "kind": x["kind"], "name": x["name"], "job": x["job"], "model": x.get("model", ""), "state": "working" if x["running"] else "done",
+                    "kind": x["kind"], "name": x["name"], "job": x["job"], "model": x.get("model", ""), "report": clean_md(x.get("report", ""), 320), "state": "working" if x["running"] else "done",
                     "time": f'{hm(x["start"])} ~ {"" if x["running"] else hm(x["end"])}',
                     "cells": x["cells"], "now": x["now"], "said": x["said"],
                 } for x in c["helpers"]],
@@ -531,7 +605,11 @@ def overlay_live(m, live):
     if m["status"] != "working" or m.get("now"):
         return
     ev = d.get("ev") or {}
-    cells = helper_cells("구현", ev, True) if (ev.get("test_write") or ev.get("fail") or ev.get("pass")) else [["일하는 중", "working", "", "짐작"]]
+    acts = (ev.get("acts") or [])[-6:]
+    if acts:
+        cells = [[past(a[1]), "done", hm(a[0]), "기록"] for a in acts[:-1]] + [[acts[-1][1], "working", hm(acts[-1][0]), "기록"]]
+    else:
+        cells = [["생각하는 중", "working", "", "기록"]]
     since = kst(d.get("since_ts"))
     mins = int((datetime.now(KST) - since).total_seconds() // 60) if since else 0
     card = {"key": None, "title": "세션이 직접 하는 일", "state": "working", "time": f'{d.get("since", "")} ~',

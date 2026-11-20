@@ -96,6 +96,38 @@ export default class WhereWasI extends View {
     }));
   }
 
+  // 칸마다 이름이 붙은 막대
+  stepBar(cells, t, h = 4) {
+    const c = palette(t);
+    if (!cells || !cells.length) return div();
+    return h_flex().w_full().gap(3).children(cells.map((s, i) => {
+      const st = s[1];
+      let bar = div().h(h).rounded(h).bg(st === "done" ? c.done : st === "working" ? c.work : c.todo);
+      if (st === "working") bar = bar.loop("opacity", { from: 0.45, to: 1, period: 1400 });
+      return v_flex().id(`sb${i}`).flex_1().min_w(0).gap(2).children([
+        bar,
+        div().truncate().text_size(9).text_color(st === "working" ? c.work : st === "done" ? t.muted : t.dim)
+          .when(st === "working", (x) => x.font_semibold()).child(s[0]),
+      ]);
+    }));
+  }
+
+  // 일하는 카드: 단계를 세로로, 지금 단계를 분명하게
+  stepList(cells, nowText, t) {
+    const c = palette(t);
+    return v_flex().gap(3).children(cells.map((s, i) => {
+      const st = s[1];
+      return h_flex().id(`sl${i}`).items_center().gap(7).children([
+        this.mark(st === "done" ? "done" : st === "working" ? "working" : "todo", t, 11),
+        div().flex_1().min_w(0).truncate().text_size(12)
+          .text_color(st === "working" ? c.work : st === "done" ? t.foreground : t.dim)
+          .when(st === "working", (x) => x.font_semibold()).child(s[0]),
+        div().text_size(10).text_color(st === "working" ? c.work : t.dim)
+          .child(st === "working" ? (nowText ? `지금 · ${nowText}` : "지금") : (s[2] || "")),
+      ]);
+    }));
+  }
+
   segCaption(list) {
     if (!list || !list.length) return "";
     const done = list.filter((c) => c[1] === "done").length;
@@ -132,6 +164,17 @@ export default class WhereWasI extends View {
         div().flex_1().child(this.segs(segs, t, 6)),
         div().text_size(12).text_color(t.muted).child(`${p.done} / ${p.total} 끝`),
       ]) : div(),
+      (() => {
+        const w = p ? p.cards.find((k) => k.state === "working") : null;
+        if (!w) return div();
+        const nowH = w.helpers.find((x) => x.state === "working") || w.helpers[0] || {};
+        const cur = (w.cells || []).find((x) => x[1] === "working");
+        return h_flex().items_center().gap(6).children([
+          svg(ICON("spinner")).size(11).text_color(palette(t).work).spin(900),
+          div().flex_1().min_w(0).truncate().text_size(12).text_color(palette(t).work)
+            .child(`지금 · ${w.key ? w.key + " " : ""}${w.title}${cur ? " · " + cur[0] : ""}${nowH.now && (!cur || cur[0] !== nowH.now) ? " · " + nowH.now : ""}`),
+        ]);
+      })(),
     ]);
   }
 
@@ -214,7 +257,8 @@ export default class WhereWasI extends View {
         div().text_size(11).text_color(t.muted).child(`${h.model || "Claude"} · ${h.kind}`),
       ]),
       h.job ? div().text_size(11).text_color(t.muted).child(`맡은 일 · ${h.job}`) : div(),
-      this.segs(h.cells, t, 3),
+      h.report ? div().text_size(11).text_color(t.muted).child(`보고 · ${h.report}`) : div(),
+      this.stepBar(h.cells, t, 3),
       div().text_size(11).text_color(working ? c.work : t.dim)
         .child(`${working ? "지금" : "마지막"} · ${working ? h.now : (h.said || h.now)}`),
     ]);
@@ -241,12 +285,11 @@ export default class WhereWasI extends View {
       ]));
       parts.push(div().h(1).bg(t.border).my(2));
       const nowH = k.helpers.find((x) => x.state === "working") || h0;
-      parts.push(div().text_size(12).text_color(c.work).child(`지금 · ${nowH.now || "일하는 중"}`));
-      parts.push(this.segs(k.cells, t, 4));
-      parts.push(div().text_size(10).text_color(t.dim).child(this.segCaption(k.cells)));
+      parts.push(this.stepList(k.cells, nowH.now && !k.cells.some((x) => x[0] === nowH.now) ? nowH.now : "", t));
+      if (h0.job) parts.push(div().pt(2).text_size(11).text_color(t.muted).child(`맡은 일 · ${h0.job}`));
     } else {
-      if (k.done_text) parts.push(div().pl(20).text_size(11).text_color(t.muted).truncate().child(k.done_text));
-      parts.push(div().pl(20).child(this.segs(k.cells, t, 3)));
+      if (k.done_text) parts.push(div().pl(20).text_size(12).text_color(t.muted).child(k.done_text));
+      parts.push(div().pl(20).pt(2).child(this.stepBar(k.cells, t, 3)));
     }
     const box = v_flex().id(`card-${id}`).gap(4).px(10).py(8).rounded(9)
       .bg(working ? t.background : t.surface)
@@ -257,6 +300,7 @@ export default class WhereWasI extends View {
     const kids = [box];
     if (open) {
       kids.push(v_flex().gap(5).pl(14).pt(6).children([
+        ...(k.after ? [v_flex().gap(2).p(8).rounded(7).bg(t.raised).children([this.label("세션이 박정욱 님께 한 말", t), div().text_size(12).text_color(t.foreground).child(k.after)])] : []),
         ...(k.cells.some((x) => x[2]) ? [div().text_size(11).text_color(t.muted).child(k.cells.map((x) => `${x[0]}${x[2] ? " " + x[2] : ""}`).join(" → "))] : []),
         ...k.helpers.map((h) => this.helperRow(h, t)),
       ]));

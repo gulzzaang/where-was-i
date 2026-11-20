@@ -13,6 +13,7 @@ import glob
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -517,8 +518,21 @@ def list_sessions():
 
     for c in codex_procs():
         out.append({"session": "codex:" + os.path.basename(c["rollout"]), "name": "", "named": False,
-                    "status": "", "cwd": "", "terminal": c["terminal"], "agent": "codex",
+                    "status": "", "cwd": c.get("cwd") or "", "terminal": c["terminal"], "agent": "codex",
                     "updated": os.path.getmtime(c["rollout"]), "transcript": c["rollout"]})
+    for a in antigravity_procs():
+        out.append({"session": "agy:" + a["conv_id"], "name": a.get("name") or "", "named": False,
+                    "status": a.get("status") or "", "cwd": a.get("cwd") or "", "terminal": a["terminal"],
+                    "agent": "antigravity", "updated": a["updated"], "transcript": a["transcript"]})
+    for o in opencode_sessions():
+        out.append({"session": "opencode:" + o["id"], "name": o.get("title") or "", "named": bool(o.get("title")),
+                    "status": o.get("status") or "", "cwd": o.get("cwd") or "", "terminal": o.get("terminal"),
+                    "agent": "opencode", "updated": o["updated"], "transcript": o["db"]})
+    for cp in copilot_sessions():
+        out.append({"session": "copilot:" + cp["id"], "name": cp.get("name") or "", "named": False,
+                    "status": cp.get("status") or "", "cwd": cp.get("cwd") or "", "terminal": cp.get("terminal"),
+                    "agent": "copilot", "updated": cp["updated"], "transcript": cp["events"],
+                    "working_hint": bool(cp.get("working"))})
     out.sort(key=lambda s: -(s["updated"] or 0))
     return out
 
@@ -1452,6 +1466,789 @@ def build_codex_map(path, alive):
     }
 
 
+# ── 다른 에이전트 공통 유틸 · 카드 변환 ───────────────────
+
+def _ms_iso(ms):
+    if not ms:
+        return None
+    try:
+        val = float(ms)
+        if val > 1e12:
+            val /= 1000.0
+        return datetime.fromtimestamp(val, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    except Exception:
+        return None
+
+
+def _lsof_info(pid):
+    """lsof 한 번으로 프로세스의 cwd 와 열어 둔 파일 경로 목록을 가져온다."""
+    cwd, files = "", []
+    try:
+        lf = subprocess.run(["lsof", "-p", str(pid), "-Fn"], capture_output=True, text=True, timeout=3).stdout
+        cur_fd = ""
+        for line in lf.splitlines():
+            if line.startswith("f"):
+                cur_fd = line[1:]
+            elif line.startswith("n"):
+                p = line[1:]
+                if cur_fd == "cwd" and not cwd:
+                    cwd = p
+                files.append(p)
+    except Exception:
+        pass
+    return cwd, files
+
+
+def _unwrap_arg(v):
+    """Antigravity transcript.jsonl 의 JSON 문자열 감싸기('\"...\"')를 풀어낸다."""
+    if isinstance(v, str):
+        s = v.strip()
+        if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+            try:
+                out = json.loads(s)
+                if isinstance(out, str):
+                    return out
+            except Exception:
+                pass
+        return v
+    return "" if v is None else str(v)
+
+
+def _format_model(mid, fallback):
+    s = str(mid or "").strip()
+    if not s or s.lower() == "auto":
+        return fallback
+    if len(s) > 36:
+        s = s[:35] + "…"
+    return s
+
+
+def _turns_to_map(agent_key, agent_label, session_key, transcript, model_label, turns, alive,
+                  first_ts, last_ts, words, words_ts, asked=None, source="log", helpers_count=0):
+    """Codex · Antigravity · OpenCode · Copilot 공통 턴 목록을 지도 JSON 으로 바꾼다."""
+    mname = _format_model(model_label, agent_label)
+    cards = []
+    for i, tn in enumerate(turns):
+        running = tn.get("state") == "working" and alive
+        acts = (tn.get("acts") or [])[-6:]
+        if running:
+            cells = [[past(a[1]), "done", hm(a[0]), "기록"] for a in acts[:-1]] + (
+                [[acts[-1][1].replace("고침", "고치는 중").replace("돌림", "돌리는 중").replace("읽음", "읽는 중").replace("씀", "쓰는 중"),
+                  "working", hm(acts[-1][0]), "기록"]] if acts else [["생각하는 중", "working", "", "기록"]])
+        else:
+            cells = [[a[1], "done", hm(a[0]), "기록"] for a in acts] or [["답", "done", hm(tn.get("end")), "기록"]]
+        ans = clean_md(tn.get("answer", ""), 600)
+        sents = re.findall(r".+?(?:[.!?。]|니다|어요|해요)(?=\s|$)", ans)
+        state = "working" if running else "done"
+        prompt = tn.get("prompt") or ""
+        title = first_sentence(prompt if not is_short(prompt) else (tn.get("first") or tn.get("asked") or prompt), 70) or f"요청 {i + 1}"
+        now = (cells[-1][0] if running else ("멈춤(중단)" if tn.get("state") == "aborted" else "끝"))
+        cards.append({
+            "key": None, "title": title, "state": state,
+            "time": f'{hm(tn.get("start"))} ~ {"" if running else hm(tn.get("end"))}', "cells": cells,
+            "done_text": short(" ".join(sents[:2]) if sents else ans, 150), "after": ans,
+            "helpers": [{"kind": agent_label, "name": mname, "job": first_sentence(prompt, 150), "model": mname,
+                         "report": "", "state": state, "time": f'{hm(tn.get("start"))} ~', "cells": cells,
+                         "now": now, "said": ""}],
+        })
+    working = [c for c in cards if c["state"] == "working"]
+    started = kst(first_ts)
+    cturns = []
+    for tn, cd in zip(turns, cards):
+        prompt = tn.get("prompt") or ""
+        acts_list = tn.get("acts") or []
+        commits = tn.get("commits") if isinstance(tn.get("commits"), int) else sum(1 for a in acts_list if a[1] == "커밋")
+        cturns.append({
+            "ts": tn.get("start"), "time": hm(tn.get("start")), "date": md(tn.get("start")),
+            "said": prompt[:400], "short": is_short(prompt),
+            "kind": "", "asked": tn.get("asked", ""), "first": tn.get("first", ""), "last": cd["done_text"],
+            "last_time": hm(tn.get("end")), "helpers": tn.get("helpers") or [], "files": tn.get("files") or [],
+            "commits": commits,
+            "tests": "실패" if tn.get("fail") and not tn.get("pass") else ("통과" if tn.get("pass") else ""),
+            "acts": [a[1] for a in acts_list][-4:], "state": cd["state"],
+        })
+    status = "asking" if (asked and alive) else ("working" if working else "idle")
+    return {
+        "turns": cturns,
+        "session": session_key, "transcript": transcript, "agent": agent_key, "source": source,
+        "started": md(first_ts), "days": (datetime.now(KST).date() - started.date()).days + 1 if started else 0,
+        "helpers": helpers_count, "status": status, "asked": asked if alive else None,
+        "last_words": first_sentence(words, 200), "last_words_at": hm(words_ts),
+        "now": [{"name": agent_label, "now": working[-1]["cells"][-1][0],
+                 "mins": int((datetime.now(KST) - kst(turns[-1].get("start"))).total_seconds() // 60) if turns and kst(turns[-1].get("start")) else 0}] if working else [],
+        "phases": [{"name": f"{agent_label} · {mname}", "date": md(first_ts), "goal": "", "src": "", "total": len(cards),
+                    "done": sum(1 for c in cards if c["state"] == "done"), "state": "working" if working else "done",
+                    "cards": cards}] if cards else [],
+        "built": datetime.now(KST).strftime("%H:%M:%S"),
+    }
+
+
+def _finalize_external_map(m, s):
+    for p_ in m.get("phases") or []:
+        for c_, t_ in zip(p_["cards"], m.get("turns") or []):
+            c_["turns"] = [t_]
+    m.pop("turns", None)
+    m.update(name=s.get("name") or "", named=bool(s.get("named")), terminal=s.get("terminal"), cwd=s.get("cwd"))
+    return m
+
+
+# ── Antigravity (agy) ─────────────────────────────────────
+# 기록: ~/.gemini/antigravity-cli/brain/<conv-id>/.system_generated/logs/transcript.jsonl
+#       (또는 ~/.gemini/antigravity, ~/.gemini/antigravity-ide)
+
+AGY_ROOTS = [
+    os.path.join(HOME, ".gemini", "antigravity-cli"),
+    os.path.join(HOME, ".gemini", "antigravity"),
+    os.path.join(HOME, ".gemini", "antigravity-ide"),
+]
+AGY_CONV_RE = re.compile(r"(.*/\.gemini/antigravity[^/]*)/(?:conversations/([0-9a-f-]+)\.db|brain/([0-9a-f-]+))")
+
+
+def agy_transcript_of(conv_id):
+    for root in AGY_ROOTS:
+        p = os.path.join(root, "brain", conv_id, ".system_generated", "logs", "transcript.jsonl")
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def antigravity_procs():
+    """떠 있는 agy / antigravity 프로세스와 열어 둔 대화 기록(transcript.jsonl)을 찾는다."""
+    out = []
+    seen_conv = set()
+    try:
+        ps = subprocess.run(["ps", "-axo", "pid=,comm="], capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return out
+    for line in ps.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid, comm = parts[0], os.path.basename(parts[1])
+        if comm not in ("agy", "antigravity-cli", "antigravity"):
+            continue
+        cwd, files = _lsof_info(pid)
+        conv_id, tr = None, None
+        for fp in files:
+            m = AGY_CONV_RE.search(fp)
+            if m:
+                base_dir = m.group(1)
+                cid = m.group(2) or m.group(3)
+                cand = os.path.join(base_dir, "brain", cid, ".system_generated", "logs", "transcript.jsonl")
+                if os.path.exists(cand):
+                    conv_id, tr = cid, cand
+                    break
+                if not conv_id:
+                    conv_id, tr = cid, cand
+        if not conv_id or conv_id in seen_conv:
+            continue
+        seen_conv.add(conv_id)
+        updated = os.path.getmtime(tr) if tr and os.path.exists(tr) else time.time()
+        out.append({
+            "pid": pid, "conv_id": conv_id, "transcript": tr,
+            "terminal": terminal_of(pid), "cwd": cwd, "updated": updated,
+            "status": "busy" if tr and os.path.exists(tr) and time.time() - updated < 30 else "idle",
+        })
+    return out
+
+
+def _agy_user_text(raw):
+    s = str(raw or "")
+    m = re.search(r"<USER_REQUEST>\s*([\s\S]*?)\s*</USER_REQUEST>", s)
+    if m:
+        return m.group(1).strip()
+    s = re.sub(r"<ADDITIONAL_METADATA>[\s\S]*?</ADDITIONAL_METADATA>", "", s)
+    s = re.sub(r"<USER_SETTINGS_CHANGE>[\s\S]*?</USER_SETTINGS_CHANGE>", "", s)
+    return s.strip()
+
+
+def _agy_model_label(mid):
+    s = str(mid or "").strip()
+    if not s:
+        return "Antigravity"
+    # gemini-4-neon-high -> Gemini 4 Neon
+    parts = [p for p in re.split(r"[-_]+", s) if p and p.lower() not in ("high", "medium", "low", "default")]
+    return " ".join(p.capitalize() if not p.isdigit() else p for p in parts[:4]) or s
+
+
+def build_antigravity_map(path, alive, sid=""):
+    turns, model, first_ts, last_ts = [], "", None, None
+    cur, pending = None, []
+    words, words_ts = "", None
+    last_step_kind = ""
+    helpers_count = 0
+    for d in iter_jsonl(path):
+        ts = d.get("created_at") or d.get("timestamp")
+        if ts:
+            first_ts = first_ts or ts
+            last_ts = ts
+        t, src = d.get("type"), d.get("source")
+        if t == "USER_INPUT" and src == "USER_EXPLICIT":
+            txt = _agy_user_text(d.get("content"))
+            if not txt:
+                continue
+            if cur is not None and cur["state"] == "working":
+                cur["end"] = cur["end"] or ts
+                cur["state"] = "done"
+            prev_ans = turns[-1]["answer"] if turns else ""
+            cur = {"start": ts, "end": None, "prompt": txt, "acts": [], "answer": "", "state": "working",
+                   "fail": None, "pass": None, "first": "", "asked": ask_context(prev_ans),
+                   "files": [], "helpers": [], "commits": 0, "asking": None}
+            turns.append(cur)
+            pending.clear()
+            last_step_kind = "user"
+        elif t == "PLANNER_RESPONSE":
+            if d.get("model"):
+                model = d["model"]
+            txt = str(d.get("content") or "").strip()
+            tcalls = d.get("tool_calls") or []
+            if txt:
+                if hangul(txt) or not words:
+                    words, words_ts = txt[:1200], ts
+                if cur is not None:
+                    if not cur["first"]:
+                        cur["first"] = first_sentence(clean_md(txt, 400), 160)
+                    cur["answer"] = txt[:1500]
+                    cur["end"] = ts
+            if cur is not None and tcalls:
+                cur["end"] = ts
+                asked_here = None
+                for tc in tcalls:
+                    tname = str(tc.get("name") or "")
+                    args = tc.get("args") or {}
+                    act = ""
+                    pkind = ""
+                    if tname in ("edit_file", "write_file", "replace_file_content", "multi_replace_file_content"):
+                        p = _unwrap_arg(args.get("Path") or args.get("TargetFile") or "")
+                        base = os.path.basename(p)
+                        if base and base not in cur["files"] and len(cur["files"]) < 40:
+                            cur["files"].append(base)
+                        act = f"시험 파일 {base} 씀" if TEST_FILE.search(p) else (f"{base} 고침" if base else "파일 고침")
+                    elif tname == "run_command":
+                        cmd = _unwrap_arg(args.get("CommandLine") or "")
+                        if "git commit" in cmd:
+                            act, pkind = "커밋", "commit"
+                        elif TEST_CMD.search(cmd):
+                            act, pkind = "시험 돌림", "test"
+                        elif re.search(r"\b(sed -i|apply_patch|cat\s*>)", cmd):
+                            act = "파일 고침"
+                        else:
+                            act = "명령 돌림"
+                    elif tname in ("read_file", "view_file", "grep_search", "find_by_name", "list_dir", "view_file_outline", "view_code_item"):
+                        act = "코드 읽음"
+                    elif tname in ("search_web", "read_url_content"):
+                        act = "웹 조사"
+                    elif tname == "invoke_subagent":
+                        role = _unwrap_arg(args.get("Role") or args.get("TypeName") or "서브에이전트")
+                        helpers_count += 1
+                        cur["helpers"].append(short(role, 40))
+                        act = f"도우미({short(role, 20)})"
+                    elif tname == "ask_question":
+                        raw_q = str(args.get("questions") or "")
+                        qm = re.search(r'"question"\s*:\s*"([^"]{1,200})"', raw_q)
+                        asked_here = short(qm.group(1) if qm else "질문 선택 기다리는 중", 160)
+                        act = "질문함"
+                    elif tname:
+                        act = f"{tname}"
+                    pending.append(pkind)
+                    if act and (not cur["acts"] or cur["acts"][-1][1] != act):
+                        cur["acts"].append([ts, act])
+                if asked_here:
+                    cur["asking"] = asked_here
+                    last_step_kind = "ask"
+                else:
+                    last_step_kind = "tool"
+            elif txt and not tcalls:
+                if cur is not None:
+                    cur["state"] = "done"
+                    cur["end"] = ts
+                    cur["asking"] = None
+                last_step_kind = "reply"
+        elif t == "GENERIC" and cur is not None:
+            pkind = pending.pop(0) if pending else ""
+            out_txt = str(d.get("content") or "")
+            if pkind == "commit" and "Command exited with code 0" in out_txt:
+                cur["commits"] += 1
+            elif pkind == "test":
+                if FAIL_OUT.search(out_txt):
+                    if not cur["pass"]:
+                        cur["fail"] = cur["fail"] or ts
+                elif PASS_OUT.search(out_txt):
+                    cur["pass"] = ts
+                elif "Command exited with code" in out_txt and "Command exited with code 0" not in out_txt:
+                    if not cur["pass"]:
+                        cur["fail"] = cur["fail"] or ts
+                elif "Command exited with code 0" in out_txt:
+                    cur["pass"] = ts
+            cur["end"] = ts
+            last_step_kind = "result"
+
+    asked = None
+    if turns:
+        recent = os.path.exists(path) and (time.time() - os.path.getmtime(path) < 600)
+        if alive and last_step_kind == "ask":
+            turns[-1]["state"] = "working"
+            asked = turns[-1].get("asking") or "질문 답 기다리는 중"
+        elif alive and last_step_kind in ("user", "tool", "result") and recent:
+            turns[-1]["state"] = "working"
+        else:
+            turns[-1]["state"] = "done"
+
+    conv_id = sid or os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(path))))
+    return _turns_to_map(
+        "antigravity", "Antigravity", "agy:" + conv_id, path, _agy_model_label(model),
+        turns, alive, first_ts, last_ts, words, words_ts, asked=asked, source="log", helpers_count=helpers_count,
+    )
+
+
+# ── OpenCode ──────────────────────────────────────────────
+# 기록: ~/.local/share/opencode/opencode.db (SQLite, session_v2 + session_message)
+
+OPENCODE_DB = os.path.join(HOME, ".local", "share", "opencode", "opencode.db")
+
+
+def _open_ro_sqlite(db_path):
+    return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+
+
+def opencode_sessions(db_path=None):
+    """OpenCode DB(session_v2)와 떠 있는 opencode TUI 프로세스를 연결해 세션 목록을 만든다."""
+    dbp = db_path or OPENCODE_DB
+    if not os.path.exists(dbp):
+        return []
+    # 떠 있는 대화형 opencode 프로세스(serve 데몬 제외)의 cwd ↔ herdr 칸
+    term_by_cwd = {}
+    try:
+        ps = subprocess.run(["ps", "-axo", "pid=,comm=,args="], capture_output=True, text=True, timeout=3).stdout
+        for line in ps.splitlines():
+            parts = line.strip().split(None, 2)
+            if len(parts) < 2:
+                continue
+            pid, comm = parts[0], os.path.basename(parts[1])
+            args = parts[2] if len(parts) > 2 else ""
+            if comm != "opencode" or " serve" in args:
+                continue
+            term = terminal_of(pid)
+            cwd, _ = _lsof_info(pid)
+            if cwd and term:
+                term_by_cwd.setdefault(cwd, []).append((pid, term))
+    except Exception:
+        pass
+
+    out = []
+    now_t = time.time()
+    try:
+        con = _open_ro_sqlite(dbp)
+        cur = con.cursor()
+        rows = cur.execute(
+            "SELECT id, directory, title, time_updated, time_busy, time_idle "
+            "FROM session_v2 WHERE parent_id IS NULL ORDER BY time_updated DESC LIMIT 12"
+        ).fetchall()
+        con.close()
+    except Exception:
+        return out
+
+    used_terms = set()
+    for sid, directory, title, t_upd, t_busy, t_idle in rows:
+        upd_sec = (t_upd or 0) / 1000.0 if (t_upd or 0) > 1e12 else float(t_upd or 0)
+        busy = (t_busy or 0) > (t_idle or 0)
+        term = None
+        if directory and directory in term_by_cwd:
+            for _pid, cand in term_by_cwd[directory]:
+                if cand not in used_terms:
+                    term = cand
+                    used_terms.add(cand)
+                    break
+        # 떠 있는 터미널과 매칭되거나, 일하는 중이거나, 24시간 내 활동한 세션만 노출
+        if not term and not busy and (now_t - upd_sec > 24 * 3600):
+            continue
+        out.append({
+            "id": sid, "title": title or "", "cwd": directory or "", "terminal": term,
+            "status": "busy" if busy else "idle", "updated": upd_sec, "db": dbp,
+        })
+    return out
+
+
+def build_opencode_map(db_path, oc_sid, alive):
+    turns, model, first_ts, last_ts = [], "", None, None
+    cur = None
+    words, words_ts = "", None
+    asked = None
+    helpers_count = 0
+    busy = False
+    try:
+        con = _open_ro_sqlite(db_path)
+        c = con.cursor()
+        srow = c.execute(
+            "SELECT title, directory, model, time_created, time_updated, time_busy, time_idle, idle_outcome "
+            "FROM session_v2 WHERE id = ?", (oc_sid,)
+        ).fetchone()
+        if srow:
+            _title, _dir, mraw, t_cr, t_up, t_busy, t_idle, _out = srow
+            first_ts = _ms_iso(t_cr)
+            last_ts = _ms_iso(t_up)
+            busy = (t_busy or 0) > (t_idle or 0)
+            if mraw:
+                try:
+                    mj = json.loads(mraw) if isinstance(mraw, str) else mraw
+                    if isinstance(mj, dict):
+                        model = mj.get("id") or ""
+                except Exception:
+                    model = str(mraw)
+        hrow = c.execute("SELECT COUNT(*) FROM session_v2 WHERE parent_id = ?", (oc_sid,)).fetchone()
+        helpers_count = int(hrow[0]) if hrow else 0
+        mrows = c.execute(
+            "SELECT type, time_created, data FROM session_message WHERE session_id = ? ORDER BY seq ASC, time_created ASC",
+            (oc_sid,)
+        ).fetchall()
+        con.close()
+    except Exception:
+        mrows = []
+
+    for mtype, t_cr, raw in mrows:
+        ts = _ms_iso(t_cr)
+        if ts:
+            first_ts = first_ts or ts
+            last_ts = ts
+        try:
+            d = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except Exception:
+            continue
+        if mtype == "user":
+            txt = str(d.get("text") or "").strip()
+            if not txt:
+                continue
+            if cur is not None and cur["state"] == "working":
+                cur["end"] = cur["end"] or ts
+                cur["state"] = "done"
+            prev_ans = turns[-1]["answer"] if turns else ""
+            cur = {"start": ts, "end": None, "prompt": txt, "acts": [], "answer": "", "state": "working",
+                   "fail": None, "pass": None, "first": "", "asked": ask_context(prev_ans),
+                   "files": [], "helpers": [], "commits": 0}
+            turns.append(cur)
+        elif mtype == "assistant":
+            mj = d.get("model")
+            if isinstance(mj, dict) and mj.get("id"):
+                model = mj["id"]
+            for blk in d.get("content") or []:
+                if not isinstance(blk, dict):
+                    continue
+                bt = blk.get("type")
+                if bt == "text":
+                    txt = str(blk.get("text") or "").strip()
+                    if txt:
+                        if hangul(txt) or not words:
+                            words, words_ts = txt[:1200], ts
+                        if cur is not None:
+                            if not cur["first"]:
+                                cur["first"] = first_sentence(clean_md(txt, 400), 160)
+                            cur["answer"] = txt[:1500]
+                            cur["end"] = ts
+                elif bt == "tool" and cur is not None:
+                    tname = str(blk.get("name") or "").lower()
+                    st = blk.get("state") or {}
+                    if isinstance(st, str):
+                        try:
+                            st = json.loads(st)
+                        except Exception:
+                            st = {}
+                    inp = st.get("input") or {}
+                    if not isinstance(inp, dict):
+                        inp = {}
+                    status = str(st.get("status") or "")
+                    out = text_of(st.get("content")) or str(st.get("output") or "")
+                    bts = _ms_iso((blk.get("time") or {}).get("created")) or ts
+                    act = ""
+                    if tname in ("shell", "bash", "run_command"):
+                        cmd = str(inp.get("command") or inp.get("cmd") or "")
+                        if "git commit" in cmd:
+                            act = "커밋"
+                            if status == "completed" and not re.search(r"(nothing to commit|error:|fatal:)", out, re.I):
+                                cur["commits"] += 1
+                        elif TEST_CMD.search(cmd):
+                            act = "시험 돌림"
+                            if status == "completed":
+                                if FAIL_OUT.search(out):
+                                    if not cur["pass"]:
+                                        cur["fail"] = cur["fail"] or bts
+                                elif PASS_OUT.search(out):
+                                    cur["pass"] = bts
+                        elif re.search(r"\b(sed -i|apply_patch|cat\s*>)", cmd):
+                            act = "파일 고침"
+                        else:
+                            act = "명령 돌림"
+                    elif tname in ("edit", "write", "patch", "apply_patch", "multiedit"):
+                        p = str(inp.get("filePath") or inp.get("file_path") or inp.get("path") or "")
+                        base = os.path.basename(p)
+                        if base and base not in cur["files"] and len(cur["files"]) < 40:
+                            cur["files"].append(base)
+                        act = f"시험 파일 {base} 씀" if TEST_FILE.search(p) else (f"{base} 고침" if base else "파일 고침")
+                    elif tname in ("read", "grep", "glob", "list", "find"):
+                        act = "코드 읽음"
+                    elif tname in ("task", "subagent"):
+                        desc = short(inp.get("description") or "도우미", 30)
+                        cur["helpers"].append(desc)
+                        act = f"도우미({desc})"
+                    elif tname in ("question", "ask"):
+                        if status in ("pending", "running"):
+                            asked = short(inp.get("question") or "질문 답 기다리는 중", 160)
+                        act = "질문함"
+                    elif tname:
+                        act = tname
+                    if act and (not cur["acts"] or cur["acts"][-1][1] != act):
+                        cur["acts"].append([bts, act])
+                    cur["end"] = bts
+        elif mtype == "idle" and cur is not None:
+            cur["end"] = ts
+            cur["state"] = "aborted" if d.get("outcome") == "interrupted" else "done"
+
+    if turns:
+        if busy:
+            turns[-1]["state"] = "working"
+        elif turns[-1]["state"] == "working":
+            turns[-1]["state"] = "done"
+
+    return _turns_to_map(
+        "opencode", "OpenCode", "opencode:" + oc_sid, db_path, model or "OpenCode",
+        turns, alive or busy, first_ts, last_ts, words, words_ts, asked=asked, source="db", helpers_count=helpers_count,
+    )
+
+
+# ── GitHub Copilot CLI ────────────────────────────────────
+# 기록: ~/.copilot/session-state/<sid>/events.jsonl + workspace.yaml + ~/.copilot/open-sessions-state.json
+
+COPILOT_DIR = os.path.join(HOME, ".copilot")
+COPILOT_SESSIONS = os.path.join(COPILOT_DIR, "session-state")
+
+
+def _parse_simple_yaml(path):
+    out = {}
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if ":" in line and not line.startswith(" "):
+                    k, v = line.split(":", 1)
+                    out[k.strip()] = v.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return out
+
+
+def copilot_events_of(sid):
+    p = os.path.join(COPILOT_SESSIONS, sid, "events.jsonl")
+    return p if os.path.exists(p) else None
+
+
+def copilot_sessions():
+    """떠 있는 copilot CLI 프로세스와 ~/.copilot/open-sessions-state.json 에서 세션을 찾는다."""
+    if not os.path.isdir(COPILOT_SESSIONS):
+        return []
+    open_state = {}
+    ost_path = os.path.join(COPILOT_DIR, "open-sessions-state.json")
+    if os.path.exists(ost_path):
+        try:
+            open_state = json.load(open(ost_path, encoding="utf-8"))
+        except Exception:
+            open_state = {}
+
+    term_by_sid, term_by_cwd = {}, {}
+    try:
+        ps = subprocess.run(["ps", "-axo", "pid=,comm=,args="], capture_output=True, text=True, timeout=3).stdout
+        for line in ps.splitlines():
+            parts = line.strip().split(None, 2)
+            if len(parts) < 2:
+                continue
+            pid, comm = parts[0], os.path.basename(parts[1])
+            args = parts[2] if len(parts) > 2 else ""
+            if comm != "copilot" and "gh-copilot" not in args and "@github/copilot" not in args:
+                continue
+            term = terminal_of(pid)
+            cwd, files = _lsof_info(pid)
+            matched = False
+            for fp in files:
+                m = re.search(r"/\.copilot/session-state/(?:\.session-operation-locks/)?([0-9a-f-]+)(?:\.lock|/|$)", fp)
+                if m:
+                    term_by_sid[m.group(1)] = (pid, term, cwd)
+                    matched = True
+                    break
+            if not matched and cwd and term:
+                term_by_cwd.setdefault(cwd, []).append((pid, term))
+    except Exception:
+        pass
+
+    out = []
+    now_t = time.time()
+    used_terms = set(v[1] for v in term_by_sid.values() if v[1])
+    for entry in os.listdir(COPILOT_SESSIONS):
+        if entry.startswith("."):
+            continue
+        sdir = os.path.join(COPILOT_SESSIONS, entry)
+        ev_path = os.path.join(sdir, "events.jsonl")
+        if not os.path.isdir(sdir) or not os.path.exists(ev_path):
+            continue
+        ws = _parse_simple_yaml(os.path.join(sdir, "workspace.yaml"))
+        cwd = ws.get("cwd") or ""
+        ost = open_state.get(entry) if isinstance(open_state, dict) else None
+        working = bool(isinstance(ost, dict) and ost.get("working"))
+        term = None
+        if entry in term_by_sid:
+            term = term_by_sid[entry][1]
+            cwd = cwd or term_by_sid[entry][2]
+        elif cwd and cwd in term_by_cwd:
+            for _pid, cand in term_by_cwd[cwd]:
+                if cand not in used_terms:
+                    term = cand
+                    used_terms.add(cand)
+                    break
+        upd = os.path.getmtime(ev_path)
+        if not term and not working and (now_t - upd > 24 * 3600):
+            continue
+        out.append({
+            "id": entry, "name": ws.get("summary") or ws.get("name") or "",
+            "cwd": cwd, "terminal": term, "working": working,
+            "status": "busy" if working else "idle", "updated": upd, "events": ev_path,
+        })
+    return out
+
+
+def _copilot_parse_args(raw):
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            d = json.loads(raw)
+            if isinstance(d, dict):
+                return d
+        except Exception:
+            pass
+    return {}
+
+
+def _copilot_tool_act(tname, args, cur):
+    tl = str(tname or "").lower()
+    if tl in ("bash", "shell", "run_in_terminal", "powershell", "exec"):
+        cmd = str(args.get("command") or args.get("cmd") or "")
+        if "git commit" in cmd:
+            return "커밋", "commit"
+        if TEST_CMD.search(cmd):
+            return "시험 돌림", "test"
+        if re.search(r"\b(sed -i|apply_patch|cat\s*>)", cmd):
+            return "파일 고침", ""
+        return "명령 돌림", ""
+    if tl in ("edit", "write", "create", "str_replace_editor", "replace_string_in_file", "create_file", "apply_patch"):
+        p = str(args.get("path") or args.get("file_path") or args.get("filePath") or "")
+        base = os.path.basename(p)
+        if base and base not in cur["files"] and len(cur["files"]) < 40:
+            cur["files"].append(base)
+        return (f"시험 파일 {base} 씀" if TEST_FILE.search(p) else (f"{base} 고침" if base else "파일 고침")), ""
+    if tl in ("view", "read", "read_file", "grep", "glob", "list_dir", "find"):
+        return "코드 읽음", ""
+    if tl in ("task", "subagent", "agent"):
+        desc = short(args.get("description") or "도우미", 30)
+        cur["helpers"].append(desc)
+        return f"도우미({desc})", ""
+    if tl in ("ask_user", "ask_questions"):
+        return "질문함", "ask"
+    return (tname or "도구"), ""
+
+
+def build_copilot_map(path, alive, sid="", working_hint=False):
+    turns, model, first_ts, last_ts = [], "", None, None
+    cur, pending = None, {}
+    words, words_ts = "", None
+    asked = None
+    helpers_count = 0
+    for d in iter_jsonl(path):
+        ts = d.get("timestamp") or (d.get("data") or {}).get("startTime")
+        if ts:
+            first_ts = first_ts or ts
+            last_ts = ts
+        t = str(d.get("type") or "")
+        data = d.get("data") or {}
+        if t == "session.start":
+            sid = data.get("sessionId") or sid
+        elif t == "session.model_change":
+            model = data.get("newModel") or model
+        elif t == "user.message":
+            txt = str(data.get("content") or data.get("text") or "").strip()
+            if not txt:
+                continue
+            if cur is not None and cur["state"] == "working":
+                cur["end"] = cur["end"] or ts
+                cur["state"] = "done"
+            prev_ans = turns[-1]["answer"] if turns else ""
+            cur = {"start": ts, "end": None, "prompt": txt, "acts": [], "answer": "", "state": "working",
+                   "fail": None, "pass": None, "first": "", "asked": ask_context(prev_ans),
+                   "files": [], "helpers": [], "commits": 0}
+            turns.append(cur)
+            asked = None
+        elif t == "assistant.message":
+            txt = str(data.get("content") or data.get("text") or "").strip()
+            if txt:
+                if hangul(txt) or not words:
+                    words, words_ts = txt[:1200], ts
+                if cur is not None:
+                    if not cur["first"]:
+                        cur["first"] = first_sentence(clean_md(txt, 400), 160)
+                    cur["answer"] = txt[:1500]
+                    cur["end"] = ts
+            for trq in data.get("toolRequests") or []:
+                if cur is None or not isinstance(trq, dict):
+                    continue
+                tid = trq.get("toolCallId") or trq.get("id") or ""
+                tname = trq.get("name") or ""
+                args = _copilot_parse_args(trq.get("arguments"))
+                act, pkind = _copilot_tool_act(tname, args, cur)
+                if tid:
+                    pending[tid] = pkind
+                if pkind == "ask":
+                    asked = short(args.get("question") or "질문 답 기다리는 중", 160)
+                if act and (not cur["acts"] or cur["acts"][-1][1] != act):
+                    cur["acts"].append([ts, act])
+        elif t == "tool.execution_start" and cur is not None:
+            tid = data.get("toolCallId") or ""
+            tname = data.get("toolName") or data.get("name") or ""
+            args = _copilot_parse_args(data.get("arguments") or data.get("input"))
+            act, pkind = _copilot_tool_act(tname, args, cur)
+            if tid:
+                pending[tid] = pkind
+            if pkind == "ask":
+                asked = short(args.get("question") or "질문 답 기다리는 중", 160)
+            if act and (not cur["acts"] or cur["acts"][-1][1] != act):
+                cur["acts"].append([ts, act])
+            cur["end"] = ts
+        elif t == "tool.execution_complete" and cur is not None:
+            tid = data.get("toolCallId") or ""
+            pkind = pending.pop(tid, "")
+            out_txt = text_of(data.get("result") or data.get("output") or "")
+            if pkind == "commit" and data.get("success", True):
+                cur["commits"] += 1
+            elif pkind == "test":
+                if FAIL_OUT.search(out_txt) or data.get("success") is False:
+                    if not cur["pass"]:
+                        cur["fail"] = cur["fail"] or ts
+                elif PASS_OUT.search(out_txt) or data.get("success") is True:
+                    cur["pass"] = ts
+            elif pkind == "ask":
+                asked = None
+            cur["end"] = ts
+        elif t == "subagent.started":
+            helpers_count += 1
+        elif t in ("assistant.turn_end", "session.idle", "session.shutdown", "abort") and cur is not None:
+            cur["end"] = ts
+            cur["state"] = "aborted" if t == "abort" else "done"
+            asked = None
+
+    if turns and working_hint:
+        turns[-1]["state"] = "working"
+
+    csid = sid or os.path.basename(os.path.dirname(path))
+    return _turns_to_map(
+        "copilot", "Copilot", "copilot:" + csid, path, model or "Copilot",
+        turns, alive or working_hint, first_ts, last_ts, words, words_ts, asked=asked, source="log", helpers_count=helpers_count,
+    )
+
+
 def main(argv):
     if len(argv) < 2 or argv[1] not in ("list", "map"):
         print(__doc__)
@@ -1477,25 +2274,56 @@ def main(argv):
     s = next((x for x in sessions if (sid and x["session"] == sid) or (term and x["terminal"] == term)), None)
     if "--codex-file" in argv and not s:
         s = {"session": "codex:file", "name": "", "terminal": None, "transcript": argv[argv.index("--codex-file") + 1], "cwd": "", "agent": "codex"}
+    if "--antigravity-file" in argv and not s:
+        s = {"session": "agy:file", "name": "", "terminal": None, "transcript": argv[argv.index("--antigravity-file") + 1], "cwd": "", "agent": "antigravity"}
+    if "--opencode-session" in argv and not s:
+        oc_id = argv[argv.index("--opencode-session") + 1]
+        oc_db = argv[argv.index("--opencode-db") + 1] if "--opencode-db" in argv else OPENCODE_DB
+        s = {"session": "opencode:" + oc_id, "name": "", "terminal": None, "transcript": oc_db, "cwd": "", "agent": "opencode"}
+    if "--copilot-file" in argv and not s:
+        s = {"session": "copilot:file", "name": "", "terminal": None, "transcript": argv[argv.index("--copilot-file") + 1], "cwd": "", "agent": "copilot"}
     if not s and sid:
-        hst = read_hook_state(sid)
-        s = {"session": sid, "name": "", "terminal": hst.get("terminal") if hst else None,
-             "transcript": (hst.get("transcript") if hst else None) or transcript_of(sid),
-             "cwd": hst.get("cwd", "") if hst else "", "named": False, "hooked": bool(hst)}
+        if sid.startswith("agy:"):
+            tr = agy_transcript_of(sid[4:])
+            s = {"session": sid, "name": "", "terminal": None, "transcript": tr, "cwd": "", "named": False, "agent": "antigravity"}
+        elif sid.startswith("opencode:"):
+            s = {"session": sid, "name": "", "terminal": None, "transcript": OPENCODE_DB if os.path.exists(OPENCODE_DB) else None,
+                 "cwd": "", "named": False, "agent": "opencode"}
+        elif sid.startswith("copilot:"):
+            s = {"session": sid, "name": "", "terminal": None, "transcript": copilot_events_of(sid[8:]),
+                 "cwd": "", "named": False, "agent": "copilot"}
+        else:
+            hst = read_hook_state(sid)
+            s = {"session": sid, "name": "", "terminal": hst.get("terminal") if hst else None,
+                 "transcript": (hst.get("transcript") if hst else None) or transcript_of(sid),
+                 "cwd": hst.get("cwd", "") if hst else "", "named": False, "hooked": bool(hst)}
     if not s or (not s.get("transcript") and not s.get("hooked")):
         print(json.dumps({"error": "no-session", "terminal": term, "session": sid}, ensure_ascii=False))
         return 0
     global SESSION_ALIVE
     SESSION_ALIVE = "status" in s
-    if s.get("agent") == "codex" or str(s.get("session", "")).startswith("codex:") or "--codex-file" in argv:
+    agent = s.get("agent") or ""
+    if agent == "codex" or str(s.get("session", "")).startswith("codex:") or "--codex-file" in argv:
         path = argv[argv.index("--codex-file") + 1] if "--codex-file" in argv else s["transcript"]
         m = build_codex_map(path, SESSION_ALIVE and "--codex-file" not in argv)
-        for p_ in m.get("phases") or []:
-            for c_, t_ in zip(p_["cards"], m.get("turns") or []):
-                c_["turns"] = [t_]
-        m.pop("turns", None)
-        m.update(name=s.get("name") or "", named=False, terminal=s.get("terminal"), cwd=s.get("cwd"))
-        print(json.dumps(m, ensure_ascii=False))
+        print(json.dumps(_finalize_external_map(m, s), ensure_ascii=False))
+        return 0
+    if agent == "antigravity" or str(s.get("session", "")).startswith("agy:") or "--antigravity-file" in argv:
+        path = argv[argv.index("--antigravity-file") + 1] if "--antigravity-file" in argv else s["transcript"]
+        cid = str(s.get("session", ""))[4:] if str(s.get("session", "")).startswith("agy:") else ""
+        m = build_antigravity_map(path, SESSION_ALIVE and "--antigravity-file" not in argv, sid=cid)
+        print(json.dumps(_finalize_external_map(m, s), ensure_ascii=False))
+        return 0
+    if agent == "opencode" or str(s.get("session", "")).startswith("opencode:") or "--opencode-session" in argv:
+        oc_id = str(s.get("session", ""))[9:] if str(s.get("session", "")).startswith("opencode:") else argv[argv.index("--opencode-session") + 1]
+        m = build_opencode_map(s["transcript"], oc_id, SESSION_ALIVE)
+        print(json.dumps(_finalize_external_map(m, s), ensure_ascii=False))
+        return 0
+    if agent == "copilot" or str(s.get("session", "")).startswith("copilot:") or "--copilot-file" in argv:
+        path = argv[argv.index("--copilot-file") + 1] if "--copilot-file" in argv else s["transcript"]
+        cid = str(s.get("session", ""))[8:] if str(s.get("session", "")).startswith("copilot:") else ""
+        m = build_copilot_map(path, SESSION_ALIVE and "--copilot-file" not in argv, sid=cid, working_hint=bool(s.get("working_hint")))
+        print(json.dumps(_finalize_external_map(m, s), ensure_ascii=False))
         return 0
     hook_state = read_hook_state(s["session"])
     m = cached_map(s["session"], s.get("transcript"), hook_state=hook_state)

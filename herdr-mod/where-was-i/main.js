@@ -19,12 +19,29 @@ const panelHidden = () => {
   };
   try { const node = find(layout()); return !!(node && node.hidden); } catch (e) { return false; }
 };
+const AGENT_META = {
+  claude: { icon: "icons/claude.svg", label: "Claude" },
+  codex: { icon: "icons/codex.svg", label: "Codex" },
+  antigravity: { icon: "icons/antigravity.svg", label: "Antigravity" },
+  opencode: { icon: "icons/opencode.svg", label: "OpenCode" },
+  copilot: { icon: "icons/copilot.svg", label: "Copilot" },
+};
+const agentKey = (kindOrAgent) => {
+  const k = String(kindOrAgent || "").toLowerCase();
+  if (k.includes("codex")) return "codex";
+  if (k.includes("antigravity") || k === "agy") return "antigravity";
+  if (k.includes("opencode")) return "opencode";
+  if (k.includes("copilot")) return "copilot";
+  return "claude";
+};
+const agentIcon = (kindOrAgent) => AGENT_META[agentKey(kindOrAgent)].icon;
+const isExternalKind = (kind) => ["Codex", "Antigravity", "OpenCode", "Copilot"].includes(kind);
 // 세션 이름은 herdr 탭 이름(직접 지은 것) → 탭에 보이는 제목 차례
 const tabName = (term) => {
   const a = term && agents().find((x) => x.address === term);
   if (!a) return "";
   const title = String(a.title || "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
-  if (a.tab_name && a.tab_name !== "Claude Code") return a.tab_name;
+  if (a.tab_name && !["Claude Code", "agy", "opencode", "copilot", "codex"].includes(a.tab_name)) return a.tab_name;
   return title || a.tab_name || "";
 };
 
@@ -223,8 +240,9 @@ export default class WhereWasI extends View {
         .on_click((_e, cx) => { this.pick = s.session; this.picking = false; this.phase = null; this.open = {}; this.refresh(cx); cx.notify(); })
         .children([
           this.mark(s.status === "busy" ? "working" : s.status === "waiting" ? "asking" : "idle", t, 11),
+          image(agentIcon(s.agent || s.session)).size(11),
           div().w(30).text_size(11).text_color(t.dim).child(s.terminal || ""),
-          div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(tabName(s.terminal) || s.name || s.session.slice(0, 8)),
+          div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(tabName(s.terminal) || s.name || s.session.slice(0, 12)),
         ])),
     ];
     return v_flex().mx(14).my(8).p(4).rounded(8).bg(t.surface).border(1).border_color(t.border).children(rows);
@@ -257,8 +275,8 @@ export default class WhereWasI extends View {
         div().text_size(10).text_color(t.dim).child(h.time),
       ]),
       h_flex().items_center().gap(5).children([
-        image(h.kind === "Codex" ? "icons/codex.svg" : "icons/claude.svg").size(11),
-        div().text_size(11).text_color(t.muted).child(h.kind === "Codex" ? `Codex · ${h.model}` : `${h.model || "Claude"} · ${h.kind}`),
+        image(agentIcon(h.kind)).size(11),
+        div().text_size(11).text_color(t.muted).child(isExternalKind(h.kind) ? `${h.kind} · ${h.model}` : `${h.model || "Claude"} · ${h.kind}`),
       ]),
       h.job ? div().text_size(11).text_color(t.muted).child(`맡은 일 · ${h.job}`) : div(),
       h.report ? div().text_size(11).text_color(t.muted).child(`보고 · ${h.report}`) : div(),
@@ -284,8 +302,8 @@ export default class WhereWasI extends View {
     const parts = [top];
     if (working) {
       parts.push(h_flex().items_center().gap(5).pl(20).children([
-        h0.kind === "세션" ? svg(ICON("terminal")).size(11).text_color(t.muted) : image(h0.kind === "Codex" ? "icons/codex.svg" : "icons/claude.svg").size(11),
-        div().text_size(11).text_color(t.muted).child(h0.kind === "세션" ? "세션이 직접" : h0.kind === "Codex" ? `Codex · ${h0.model}` : `${h0.model || "Claude"} · ${h0.kind || ""}${k.helpers.length > 1 ? ` 외 ${k.helpers.length - 1}` : ""}`),
+        h0.kind === "세션" ? svg(ICON("terminal")).size(11).text_color(t.muted) : image(agentIcon(h0.kind)).size(11),
+        div().text_size(11).text_color(t.muted).child(h0.kind === "세션" ? "세션이 직접" : isExternalKind(h0.kind) ? `${h0.kind} · ${h0.model}` : `${h0.model || "Claude"} · ${h0.kind || ""}${k.helpers.length > 1 ? ` 외 ${k.helpers.length - 1}` : ""}`),
       ]));
       parts.push(div().h(1).bg(t.border).my(2));
       const nowH = k.helpers.find((x) => x.state === "working") || h0;
@@ -383,7 +401,7 @@ export default class WhereWasI extends View {
     if (!d) return root.child(div().p(16).text_size(12).text_color(t.dim).child(this.err || "지도를 읽는 중…"));
     if (d.error) {
       return root.children([
-        div().p(16).text_size(12).text_color(t.dim).child("이 칸에는 Claude 세션이 없어요. 다른 칸을 보거나 세션을 골라 주세요."),
+        div().p(16).text_size(12).text_color(t.dim).child("이 칸에는 AI 세션이 없어요. 다른 칸을 보거나 세션을 골라 주세요."),
         div().id("pick2").mx(16).text_size(12).text_color(palette(t).work).on_click((_e, cx) => { this.picking = !this.picking; if (this.picking) this.loadSessions(cx); cx.notify(); }).child("세션 고르기"),
         this.picking ? this.picker(t, cx) : div(),
       ]);
@@ -415,7 +433,7 @@ export default class WhereWasI extends View {
         v_flex().px(14).pt(10).pb(12).gap(10).children(parts),
       ]),
       div().px(14).py(6).border_t(1).border_color(t.border).text_size(10).text_color(t.dim)
-        .child(`${d.source === "hook+log" ? "훅 + 대화 기록" : "대화 기록에서 읽음"} · ${d.built}${this.busy ? " · 다시 읽는 중" : ""}`),
+        .child(`${d.source === "hook+log" ? "훅 + 대화 기록" : d.source === "db" ? "OpenCode 기록에서 읽음" : "대화 기록에서 읽음"} · ${d.built}${this.busy ? " · 다시 읽는 중" : ""}`),
     ]);
   }
 }

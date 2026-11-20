@@ -1,12 +1,12 @@
 # where was i
 
-Claude Code(와 Codex) 세션이 **무엇을 지시받아 어떻게, 어디까지 일했는지**를 herdr 오른쪽 칸에 보여 주는 개인 도구다. Claude Code 훅과 대화 기록 파일을 로컬에서만 읽고 적으며 AI를 부르지 않는다(토큰 0).
+Claude Code · Codex · Antigravity(`agy`) · OpenCode · Copilot CLI 세션이 **무엇을 지시받아 어떻게, 어디까지 일했는지**를 herdr 오른쪽 칸에 보여 주는 개인 도구다. 각 도구의 로컬 기록(과 Claude Code 훅)만 읽고 적으며 AI를 부르지 않는다(토큰 0).
 
 프로토타입이다.
 
 ## 팀원이 처음 깔 때
 
-준비물: herdr 앱(**설치할 때 창이 열려 있어야 함**, `herdr-app` 명령이 PATH 에 있음), python3 3.9 이상(맥 기본 것으로 됨), Claude Code 또는 Codex. 설치가 이것들을 먼저 점검하고, 끝나면 칸 검사 · 훅 검사 · 세션 찾기까지 스스로 확인한다.
+준비물: herdr 앱(**설치할 때 창이 열려 있어야 함**, `herdr-app` 명령이 PATH 에 있음), python3 3.9 이상(맥 기본 것으로 됨), 지원하는 AI CLI 중 하나 이상(Claude Code · Codex · Antigravity · OpenCode · Copilot CLI). 설치가 이것들을 먼저 점검하고, 끝나면 칸 검사 · 훅 검사 · 세션 찾기까지 스스로 확인한다.
 
 설치 자리는 **`~/.where-was-i`** 로 정해 둔다(어느 AI 든 이 자리만 보면 되게).
 
@@ -51,7 +51,7 @@ python3 ~/.where-was-i/scripts/herdr_setup.py install
 ## 파일
 
 - `wwi_hook.py`: Claude Code 훅 기록기(토큰 0). 세션 ↔ herdr 칸 · 도우미 시작/끝 · 도구/질문/권한 대기 상태를 `~/.cache/where-was-i/hooks/` 에만 적는다.
-- `pmap.py`: 훅 기록과 대화 기록을 함께 읽어 지도 자료(JSON)를 만든다. `list`, `map --terminal tNN`, `map --session <id>`, `map --codex-file <rollout.jsonl>`.
+- `pmap.py`: 훅 기록과 각 AI 도구의 로컬 기록(Claude Code · Codex · Antigravity · OpenCode · Copilot CLI)을 읽어 지도 자료(JSON)를 만든다. `list`, `map --terminal tNN`, `map --session <id>`, `map --codex-file <rollout.jsonl>`, `map --antigravity-file <transcript.jsonl>`, `map --opencode-session <id>`, `map --copilot-file <events.jsonl>`.
 - `herdr-mod/where-was-i/`: herdr 칸(gpui-kit JS).
 - `scripts/herdr_setup.py`: 설치 · 업데이트 · 지우기.
 

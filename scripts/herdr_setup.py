@@ -175,10 +175,16 @@ def check():
     if sys.version_info < (3, 9):
         print("✗ python3 3.9 이상이 필요함")
         ok = False
-    v = subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout.strip() if shutil.which("claude") else ""
-    print("· Claude Code:", v or "못 찾음(Codex 만 써도 됨)")
+    agents_found = []
+    for label, cmd in (("Claude Code", ["claude", "--version"]), ("Codex", ["codex", "--version"]),
+                       ("Antigravity", ["agy", "--version"]), ("OpenCode", ["opencode", "--version"]),
+                       ("Copilot", ["copilot", "--version"])):
+        if shutil.which(cmd[0]):
+            ver = (subprocess.run(cmd, capture_output=True, text=True).stdout or "").strip().splitlines()
+            agents_found.append(f"{label}({ver[0][:40]})" if ver else label)
+    print("· AI 도구:", ", ".join(agents_found) if agents_found else "못 찾음")
     sdir = os.path.join(HOME, ".claude", "sessions")
-    if v and not (os.path.isdir(sdir) and any(f.endswith(".json") for f in os.listdir(sdir))):
+    if shutil.which("claude") and not (os.path.isdir(sdir) and any(f.endswith(".json") for f in os.listdir(sdir))):
         print("  · ~/.claude/sessions 가 비어 있음 — 새로 여는 Claude Code 세션은 이번에 넣는 훅이 바로 잡는다")
     if ok:
         st = app("status")

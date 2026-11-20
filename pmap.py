@@ -153,11 +153,15 @@ def read_helper(jsonl):
     return scan_lines(iter_jsonl(jsonl))
 
 
-def scan_lines(lines):
-    """기록 줄들에서 흔적을 모은다: 시험 쓰기 · 실패 · 구현 · 통과 · 커밋 · 마지막 행동."""
-    ev = {"first": None, "last": None, "test_write": None, "fail": None, "impl": None, "pass": None,
-          "commit": None, "steps": None, "now": "", "last_text": "", "tools": 0}
-    pending = {}
+def new_ev():
+    return {"first": None, "last": None, "test_write": None, "fail": None, "impl": None, "pass": None,
+            "commit": None, "steps": None, "now": "", "last_text": "", "tools": 0, "_pending": {}}
+
+
+def scan_lines(lines, ev=None):
+    """기록 줄들에서 흔적을 모은다: 시험 쓰기 · 실패 · 구현 · 통과 · 커밋 · 마지막 행동. ev 를 주면 이어서 쌓는다."""
+    ev = ev or new_ev()
+    pending = ev.setdefault("_pending", {})
     for d in lines:
         ts = d.get("timestamp")
         if ts:
@@ -216,6 +220,7 @@ def scan_lines(lines):
                     ev["now"] = "코드 읽는 중"
                 elif name == "SubagentHandback":
                     ev["now"] = "보고하고 끝냄"
+                    ev["report"] = str(inp.get("message") or "")[:1200]
             elif t == "tool_result":
                 kind = pending.pop(b.get("tool_use_id"), None)
                 if not kind:
@@ -269,7 +274,118 @@ def task_key(desc):
     return ("T" + m.group(1)) if m else None
 
 
+def read_new_lines(path, offset):
+    """offset 뒤에 붙은 온전한 줄만 읽는다(기록 파일은 뒤에 붙기만 한다)."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return [], offset, False
+    reset = size < offset
+    if reset:
+        offset = 0
+    with open(path, "rb") as f:
+        f.seek(offset)
+        data = f.read()
+    cut = data.rfind(b"\n")
+    if cut < 0:
+        return [], offset, reset
+    lines = []
+    for raw in data[: cut + 1].splitlines():
+        try:
+            lines.append(json.loads(raw))
+        except Exception:
+            continue
+    return lines, offset + cut + 1, reset
+
+
+def load_state(path, default):
+    try:
+        return json.load(open(path))
+    except Exception:
+        return default
+
+
+def save_state(path, st):
+    with open(path + ".tmp", "w") as f:
+        json.dump(st, f, ensure_ascii=False)
+    os.replace(path + ".tmp", path)
+
+
+RELEVANT = {"Skill", "Write", "AskUserQuestion", "Agent"}
+
+
+def update_main(tr, st):
+    """세션 기록의 새 줄만 읽어 지도에 쓸 사건만 모은다."""
+    lines, st["offset"], reset = read_new_lines(tr, st.get("offset", 0))
+    if reset:
+        st.clear()
+        st["offset"] = 0
+        lines, st["offset"], _ = read_new_lines(tr, 0)
+    st.setdefault("events", [])
+    seen = set(st.get("seen", []))
+    for d in lines:
+        ts = d.get("timestamp")
+        if ts:
+            st["first_ts"] = st.get("first_ts") or ts
+            st["last_ts"] = ts
+        m = d.get("message") or {}
+        content = m.get("content")
+        if d.get("type") == "user" and isinstance(content, str) and not d.get("isMeta"):
+            x = content.lstrip()
+            if x and not x.startswith(("<", "[SYSTEM", "Another Claude", "Caveat:", "[Request interrupted")):
+                st["asked"] = None
+                st["prompt"], st["prompt_ts"], st["seg"] = x[:400], ts, new_ev()
+            continue
+        st["seg"] = scan_lines([d], st.get("seg"))
+        if not isinstance(content, list):
+            continue
+        for b in content:
+            t = b.get("type")
+            if t == "text" and d.get("type") == "assistant" and b.get("text", "").strip():
+                st["words"], st["words_ts"] = b["text"][:1200], ts
+            if t != "tool_use" or b.get("name") not in RELEVANT or b.get("id") in seen:
+                continue
+            seen.add(b.get("id"))
+            name, inp = b.get("name"), b.get("input") or {}
+            if name == "Skill" and inp.get("skill") in ("superpowers:writing-plans", "superpowers:brainstorming"):
+                st["events"].append(["phase", ts, "설계 · 계획" if "brainstorm" in inp["skill"] else "계획", "", ""])
+            elif name == "Write" and re.search(r"(plans?/|plan-|계획)[^/]*\.md$", inp.get("file_path", "")):
+                c = inp.get("content", "")
+                m2 = re.search(r"^#\s+(.+)$", c, re.M)
+                goal = re.search(r"\*\*Goal:\*\*\s*(.+)", c)
+                st["events"].append(["phase", ts, short(m2.group(1) if m2 else os.path.basename(inp["file_path"]), 60),
+                                     inp["file_path"], first_sentence(goal.group(1), 160) if goal else ""])
+            elif name == "AskUserQuestion":
+                qs = inp.get("questions") or []
+                st["asked"] = short(qs[0].get("question") if qs else "질문", 120)
+            elif name == "Agent":
+                st["events"].append(["agent", ts, b.get("id"), inp.get("description") or "", inp.get("subagent_type") or "",
+                                     first_sentence(re.sub(r"^너는[^.]*?\.\s*", "", inp.get("prompt") or ""), 150),
+                                     inp.get("model") or ""])
+    st["seen"] = list(seen)
+    return st
+
+
+def update_helper(path, hst):
+    """도우미 기록도 새 줄만 읽어 흔적을 이어 쌓는다."""
+    lines, off, reset = read_new_lines(path, hst.get("offset", 0))
+    ev = new_ev() if reset or "ev" not in hst else hst["ev"]
+    hst["ev"], hst["offset"] = scan_lines(lines, ev), off
+    return hst
+
+
+def model_name(mid):
+    m = re.search(r"(opus|sonnet|haiku|fable)", str(mid or ""), re.I)
+    return m.group(1).capitalize() if m else ""
+
+
 def build_map(sid, tr):
+    os.makedirs(CACHE, exist_ok=True)
+    mpath, hpath = os.path.join(CACHE, sid + ".main.json"), os.path.join(CACHE, sid + ".helpers.json")
+    st = update_main(tr, load_state(mpath, {}))
+    save_state(mpath, st)
+    hcache = load_state(hpath, {})
+
     sub_dir = tr[:-6] + "/subagents" if tr else None
     metas = {}
     if sub_dir and os.path.isdir(sub_dir):
@@ -283,92 +399,53 @@ def build_map(sid, tr):
                 metas[meta["toolUseId"]] = meta
 
     phases = [{"name": "처음", "start": None, "items": [], "goal": "", "src": ""}]
-    helpers_by_id = {}
-    first_ts = last_ts = None
-    last_words, last_words_ts = "", None
-    asked = None
-    seen_ids = set()
-    main_seg, last_prompt, last_prompt_ts = [], "", None
 
-    def new_phase(name, ts, src=""):
+    def new_phase(name, ts, src="", goal=""):
         cur = phases[-1]
-        if not cur["items"] and cur["name"] == "처음":
-            cur.update(name=name, start=ts, src=src)
+        st_ = kst(cur["start"]) if cur["start"] else None
+        if (not cur["items"] and cur["name"] == "처음") or (st_ and kst(ts) and (kst(ts) - st_) < timedelta(minutes=30) and not cur["items"]):
+            cur.update(name=name, start=cur["start"] or ts, src=src or cur["src"], goal=goal or cur["goal"])
             return
-        # 30분 안에 이어 나온 경계는 하나로
-        st = kst(cur["start"]) if cur["start"] else None
-        if st and kst(ts) and (kst(ts) - st) < timedelta(minutes=30) and not cur["items"]:
-            cur.update(name=name, src=src or cur["src"])
-            return
-        phases.append({"name": name, "start": ts, "items": [], "goal": "", "src": src})
+        phases.append({"name": name, "start": ts, "items": [], "goal": goal, "src": src})
 
-    for d in iter_jsonl(tr):
-        ts = d.get("timestamp")
-        if ts:
-            first_ts = first_ts or ts
-            last_ts = ts
-        m = d.get("message") or {}
-        content = m.get("content")
-        if d.get("type") == "user" and isinstance(content, str) and not d.get("isMeta"):
-            s = content.lstrip()
-            if s and not s.startswith(("<", "[SYSTEM", "Another Claude", "Caveat:", "[Request interrupted")):
-                asked = None
-                main_seg, last_prompt, last_prompt_ts = [], s, ts
-            continue
-        main_seg.append(d)
-        if not isinstance(content, list):
-            continue
-        for b in content:
-            t = b.get("type")
-            if t == "text" and d.get("type") == "assistant" and b.get("text", "").strip():
-                last_words, last_words_ts = b["text"], ts
-            if t != "tool_use":
-                continue
-            bid = b.get("id")
-            if bid in seen_ids:
-                continue
-            seen_ids.add(bid)
-            name, inp = b.get("name"), b.get("input") or {}
-            if name == "Skill" and inp.get("skill") in ("superpowers:writing-plans", "superpowers:brainstorming"):
-                new_phase("설계 · 계획" if "brainstorm" in inp["skill"] else "계획", ts)
-            elif name == "Write" and re.search(r"(plans?/|plan-|계획)[^/]*\.md$", inp.get("file_path", "")):
-                title = ""
-                m2 = re.search(r"^#\s+(.+)$", inp.get("content", ""), re.M)
-                if m2:
-                    title = m2.group(1)
-                goal = re.search(r"\*\*Goal:\*\*\s*(.+)", inp.get("content", ""))
-                new_phase(short(title or os.path.basename(inp["file_path"]), 60), ts, inp["file_path"])
-                if goal:
-                    phases[-1]["goal"] = first_sentence(goal.group(1), 160)
-            elif name == "AskUserQuestion":
-                qs = inp.get("questions") or []
-                asked = short(qs[0].get("question") if qs else "질문", 120)
-            elif name == "Agent":
-                desc = inp.get("description") or ""
-                meta = metas.get(bid) or {}
-                kind = helper_kind(desc, inp.get("subagent_type") or meta.get("agentType"))
-                if kind == "계획" or PLAN_DESC.search(desc):
-                    label = re.sub(r"\s*(구현\s*)?계획서\s*(작성|쓰기)?\s*", " ", desc).strip() or "계획"
-                    new_phase(short(label, 40), ts)
-                job = first_sentence(re.sub(r"^너는[^.]*?\.\s*", "", inp.get("prompt") or ""), 150)
-                h = {"id": bid, "name": desc, "kind": kind, "key": task_key(desc), "job": job, "start": ts,
-                     "jsonl": meta.get("_jsonl"), "agentType": inp.get("subagent_type") or meta.get("agentType")}
-                helpers_by_id[bid] = h
-                phases[-1]["items"].append(h)
+    for e in st["events"]:
+        if e[0] == "phase":
+            new_phase(e[2], e[1], e[3], e[4])
+        elif e[0] == "agent":
+            _, ts, bid, desc, atype, job, model = (e + [""])[:7]
+            meta = metas.get(bid) or {}
+            kind = helper_kind(desc, atype or meta.get("agentType"))
+            if kind == "계획" or PLAN_DESC.search(desc):
+                label = re.sub(r"\s*(구현\s*)?계획서\s*(작성|쓰기)?\s*", " ", desc).strip() or "계획"
+                new_phase(short(label, 40), ts)
+            phases[-1]["items"].append({"id": bid, "name": desc, "kind": kind, "key": task_key(desc), "job": job, "start": ts,
+                                        "jsonl": meta.get("_jsonl"), "model": model_name(model or meta.get("pickedEffortModel"))})
 
     now_t = time.time()
     running_helpers = []
     for ph in phases:
         for h in ph["items"]:
-            ev = read_helper(h["jsonl"]) if h["jsonl"] else {"first": h["start"], "last": h["start"], "test_write": None,
-                                                              "fail": None, "impl": None, "pass": None, "commit": None,
-                                                              "steps": None, "now": "", "last_text": "", "tools": 0}
+            if h["jsonl"] and os.path.exists(h["jsonl"]):
+                hst = hcache.get(h["jsonl"], {})
+                if hst.get("mtime") != os.path.getmtime(h["jsonl"]):
+                    hst = update_helper(h["jsonl"], hst)
+                    hst["mtime"] = os.path.getmtime(h["jsonl"])
+                    hcache[h["jsonl"]] = hst
+                ev = hst["ev"]
+            else:
+                ev = new_ev()
+                ev["first"] = ev["last"] = h["start"]
             running = (bool(h["jsonl"]) and os.path.exists(h["jsonl"]) and now_t - os.path.getmtime(h["jsonl"]) < RUNNING_SEC
                        and ev["now"] != "보고하고 끝냄")
             h.update(running=running, end=ev["last"], now=ev["now"] or ("일하는 중" if running else "끝"),
-                     said=first_sentence(ev["last_text"], 160), cells=helper_cells(h["kind"], ev, running))
+                     said=first_sentence(ev.get("report") or ev["last_text"], 160), cells=helper_cells(h["kind"], ev, running))
             if running:
                 running_helpers.append(h)
+    save_state(hpath, hcache)
+    first_ts, last_ts = st.get("first_ts"), st.get("last_ts")
+    last_words, last_words_ts, asked = st.get("words", ""), st.get("words_ts"), st.get("asked")
+    last_prompt, last_prompt_ts = st.get("prompt", ""), st.get("prompt_ts")
+    main_ev = st.get("seg") or new_ev()
 
     # 할 일 카드로 묶기: 같은 덩어리 안 같은 번호
     out_phases = []
@@ -410,7 +487,7 @@ def build_map(sid, tr):
                 "time": f'{hm(c["start"])} ~ {"" if c["running"] else hm(c["end"])}',
                 "cells": c["cells"], "done_text": c["done_text"],
                 "helpers": [{
-                    "kind": x["kind"], "name": x["name"], "job": x["job"], "state": "working" if x["running"] else "done",
+                    "kind": x["kind"], "name": x["name"], "job": x["job"], "model": x.get("model", ""), "state": "working" if x["running"] else "done",
                     "time": f'{hm(x["start"])} ~ {"" if x["running"] else hm(x["end"])}',
                     "cells": x["cells"], "now": x["now"], "said": x["said"],
                 } for x in c["helpers"]],
@@ -433,28 +510,12 @@ def build_map(sid, tr):
         "phases": out_phases,
         "built": datetime.now(KST).strftime("%H:%M:%S"),
         "direct": {"prompt": first_sentence(last_prompt, 90), "since": hm(last_prompt_ts), "since_ts": last_prompt_ts,
-                   "ev": scan_lines(main_seg)},
+                   "ev": main_ev},
     }
 
 
 def cached_map(sid, tr):
-    """기록이 안 바뀌었으면 지난 결과를 쓴다(큰 파일을 매번 훑지 않으려고)."""
-    os.makedirs(CACHE, exist_ok=True)
-    cp = os.path.join(CACHE, sid + ".json")
-    sub = tr[:-6] + "/subagents"
-    newest = max([os.path.getmtime(tr)] + [os.path.getmtime(p) for p in glob.glob(sub + "/*.jsonl")]) if tr else 0
-    try:
-        c = json.load(open(cp))
-        if c.get("_src_mtime") == newest and time.time() - c.get("_built_at", 0) < 300:
-            return c
-    except Exception:
-        pass
-    m = build_map(sid, tr)
-    m["_src_mtime"], m["_built_at"] = newest, time.time()
-    with open(cp + ".tmp", "w") as f:
-        json.dump(m, f, ensure_ascii=False)
-    os.replace(cp + ".tmp", cp)
-    return m
+    return build_map(sid, tr)
 
 
 def overlay_live(m, live):

@@ -320,7 +320,7 @@ export default class WhereWasI extends View {
     }
     if (open) {
       kids.push(v_flex().gap(5).pl(14).pt(6).children([
-        ...(k.after ? [v_flex().gap(2).p(8).rounded(7).bg(t.raised).children([this.label("세션이 박정욱 님께 한 말", t), div().text_size(12).text_color(t.foreground).child(k.after)])] : []),
+        ...(k.after ? [v_flex().gap(2).p(8).rounded(7).bg(t.raised).children([this.label("세션이 나에게 한 말", t), div().text_size(12).text_color(t.foreground).child(k.after)])] : []),
         ...(k.cells.some((x) => x[2]) ? [div().text_size(11).text_color(t.muted).child(k.cells.map((x) => `${x[0]}${x[2] ? " " + x[2] : ""}`).join(" → "))] : []),
         ...k.helpers.map((h) => this.helperRow(h, t)),
       ]));

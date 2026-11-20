@@ -412,7 +412,8 @@ export default class WhereWasI extends View {
               div().flex_1(),
               div().text_size(11).text_color(t.dim).child(open ? "접기" : `마지막 「${turns[turns.length - 1].said.slice(0, 14)}${turns[turns.length - 1].said.length > 14 ? "…" : ""}」`),
             ]),
-          open ? v_flex().gap(5).children(turns.map((tn, j) => this.turnCard(tn, `${idx}-${j}`, t))) : div(),
+          // 최근 지시가 위로(내림차순)
+          open ? v_flex().gap(5).children(turns.map((tn, j) => [tn, j]).reverse().map(([tn, j]) => this.turnCard(tn, `${idx}-${j}`, t))) : div(),
         ]));
       }
       const nodes = [];

@@ -516,6 +516,10 @@ def list_sessions():
             out.append(item)
             by_sid[sid] = item
 
+    # 시험용: 이 맥에 실제로 떠 있는 다른 에이전트(codex · agy · opencode · copilot)는 훑지 않는다
+    if os.environ.get("WWI_SKIP_LIVE_AGENTS") == "1":
+        out.sort(key=lambda s: -(s["updated"] or 0))
+        return out
     for c in codex_procs():
         out.append({"session": "codex:" + os.path.basename(c["rollout"]), "name": "", "named": False,
                     "status": "", "cwd": c.get("cwd") or "", "terminal": c["terminal"], "agent": "codex",

@@ -24,6 +24,8 @@ class HookIntegrationTests(unittest.TestCase):
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HC_TERMINAL_ID": "t42",
             "WWI_SESSION_PID": str(os.getpid()),
+            # 이 맥에 실제로 떠 있는 다른 에이전트 세션이 시험에 섞이지 않게
+            "WWI_SKIP_LIVE_AGENTS": "1",
         }
 
     def tearDown(self):

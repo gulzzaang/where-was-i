@@ -64,15 +64,17 @@ export default class WhereWasI extends View {
     this.lastTerm = null;
     this.phase = null;
     this.open = {};
+    this.showAhead = false;  // 「앞으로 N」 칩을 눌러 남은 일 목록을 보는 중
     this.busy = false;
     this.convOpen = {};    // 카드마다 「대화」 펼침
     this.turnOpen = {};    // 지시 카드 하나 전체 보기
     if (checking()) return;
-    // herdr 명령: where-was-i.toggle — 펼친 대화를 모두 접기
+    // herdr 명령: where-was-i.toggle — 펼친 대화를 모두 접기, where-was-i.ahead — 「앞으로」 목록 열고 닫기
     cx.spawn(async (cx) => {
       for (;;) {
         const c = await nextCommand();
         if (c === "toggle") this.convOpen = {};
+        if (c === "ahead") { this.showAhead = !this.showAhead; this.open = {}; }
         cx.notify();
       }
     });
@@ -102,7 +104,7 @@ export default class WhereWasI extends View {
         if (raw === this.lastRaw && t === this.lastTerm) { this.busy = false; return; }
         this.lastRaw = raw;
         const d = JSON.parse(r.stdout || "{}");
-        if (!this.pick && t !== this.lastTerm) { this.phase = null; this.open = {}; }
+        if (!this.pick && t !== this.lastTerm) { this.phase = null; this.open = {}; this.showAhead = false; }
         if (!this.pick) this.lastTerm = t;
         this.data = d; this.err = d.error ? d.error : "";
       } catch (e) {
@@ -220,6 +222,11 @@ export default class WhereWasI extends View {
           .child(`지금 · ${w.key ? w.key + " " : ""}${w.title}${cur ? " · " + cur[0] : ""}${nowH.now && (!cur || cur[0] !== nowH.now) ? " · " + nowH.now : ""}`),
       ]));
     }
+    const a = d.ahead;
+    if (a && a.left > 0) rows.push(h_flex().items_center().gap(6).children([
+      div().size(9).rounded_full().border(1).border_color(t.muted),
+      div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(`다음 · ${a.next}`),
+    ]));
     if (d.asked) rows.push(h_flex().items_start().gap(6).px(8).py(5).rounded(7).bg(t.raised).border(1).border_color(c.ask).children([
       this.mark("asking", t, 12),
       div().flex_1().min_w(0).text_size(12).text_color(c.ask).child(d.asked.length > 160 ? d.asked.slice(0, 159) + "…" : d.asked),
@@ -234,10 +241,10 @@ export default class WhereWasI extends View {
   picker(t, cx) {
     const rows = [
       h_flex().id("pick-follow").px(10).py(6).rounded(6).hover((s) => s.bg(t.raised))
-        .on_click((_e, cx) => { this.pick = null; this.picking = false; this.phase = null; this.open = {}; this.lastTerm = null; this.refresh(cx); cx.notify(); })
+        .on_click((_e, cx) => { this.pick = null; this.picking = false; this.phase = null; this.open = {}; this.showAhead = false; this.lastTerm = null; this.refresh(cx); cx.notify(); })
         .child(div().text_size(12).text_color(palette(t).work).child("지금 보는 칸 따라가기")),
       ...this.sessions.map((s) => h_flex().id(`pick-${s.session}`).items_center().gap(8).px(10).py(6).rounded(6).hover((x) => x.bg(t.raised))
-        .on_click((_e, cx) => { this.pick = s.session; this.picking = false; this.phase = null; this.open = {}; this.refresh(cx); cx.notify(); })
+        .on_click((_e, cx) => { this.pick = s.session; this.picking = false; this.phase = null; this.open = {}; this.showAhead = false; this.refresh(cx); cx.notify(); })
         .children([
           this.mark(s.status === "busy" ? "working" : s.status === "waiting" ? "asking" : "idle", t, 11),
           image(agentIcon(s.agent || s.session)).size(11),
@@ -250,19 +257,59 @@ export default class WhereWasI extends View {
 
   road(d, t, idx) {
     const c = palette(t);
-    return v_flex().gap(6).children([
-      this.label("지나온 길", t),
-      h_flex().flex_wrap().gap(4).children(d.phases.map((p, i) => {
-        const on = i === idx;
+    const a = d.ahead && d.ahead.left > 0 ? d.ahead : null;
+    const chips = d.phases.map((p, i) => {
+        const on = i === idx && !this.showAhead;
         return h_flex().id(`ph-${i}`).items_center().gap(5).px(8).py(3).rounded(12).border(1)
           .border_color(on ? c.work : t.border).when(on, (s) => s.bg(t.raised)).hover((s) => s.bg(t.raised))
-          .on_click((_e, cx) => { this.phase = i; this.open = {}; cx.notify(); })
+          .on_click((_e, cx) => { this.phase = i; this.open = {}; this.showAhead = false; cx.notify(); })
           .children([
             this.mark(p.state === "working" ? "working" : "done", t, 10),
             div().text_size(11).text_color(on ? t.foreground : t.muted).child(`${p.date} ${p.name.length > 12 ? p.name.slice(0, 11) + "…" : p.name}`),
           ]);
-      })),
+      });
+    if (a) chips.push(h_flex().id("ph-ahead").items_center().gap(5).px(8).py(3).rounded(12).border(1).border_color(c.work)
+      .when(this.showAhead, (s) => s.bg(t.raised)).hover((s) => s.bg(t.raised))
+      .on_click((_e, cx) => { this.showAhead = !this.showAhead; this.open = {}; cx.notify(); })
+      .child(div().text_size(11).font_semibold().text_color(c.work).child(`앞으로 ${a.left}`)));
+    return v_flex().gap(6).children([
+      d.phases.length ? this.label("지나온 길", t) : div(),
+      h_flex().flex_wrap().gap(4).children(chips),
     ]);
+  }
+
+  aheadList(a, t) {
+    const c = palette(t);
+    const tag = a.source === "할 일 목록" ? "할 일 목록에서" : `${a.source}에서 · 끝남은 짐작`;
+    const left = a.items.filter((x) => x.state !== "done");
+    const done = a.items.filter((x) => x.state === "done");
+    // 움직이지 않는 기호만: 대기 빈 원 · 하는 중 채운 원 · 멈춤 노란 원 · 끝 흐린 원
+    const dot = (st) => st === "working" ? div().size(9).rounded_full().bg(c.work)
+      : st === "stopped" ? div().size(9).rounded_full().bg(c.ask)
+      : st === "done" ? div().size(9).rounded_full().bg(t.dim)
+      : div().size(9).rounded_full().border(1).border_color(t.muted);
+    const row = (x) => h_flex().items_center().gap(7).children([
+      dot(x.state),
+      x.key ? div().w(26).text_size(11).text_color(t.dim).child(x.key) : div(),
+      div().flex_1().min_w(0).truncate().text_size(12).text_color(x.state === "done" ? t.dim : t.foreground).child(x.title),
+      x.state === "working" ? div().text_size(11).text_color(c.work).child("하는 중")
+        : x.state === "stopped" ? div().text_size(11).text_color(c.ask).child("멈춤") : div(),
+    ]);
+    const rows = [
+      h_flex().items_center().gap(8).children([
+        div().text_size(16).font_semibold().child("앞으로"),
+        div().text_size(11).text_color(t.dim).child(tag),
+      ]),
+      ...left.slice(0, 8).map(row),
+    ];
+    if (left.length > 8) rows.push(div().text_size(11).text_color(t.dim).child(`나머지 ${left.length - 8}개`));
+    if (done.length) {
+      const open = !!this.open.aheadDone;
+      rows.push(h_flex().id("ahead-done").items_center().on_click((_e, cx) => { this.open.aheadDone = !open; cx.notify(); })
+        .child(div().text_size(11).text_color(t.muted).child(`끝난 것 ${done.length}개 ${open ? "▾" : "▸"}`)));
+      if (open) done.forEach((x) => rows.push(row(x)));
+    }
+    return v_flex().gap(7).p(10).rounded(8).bg(t.background).border(1).border_color(t.border).children(rows);
   }
 
   helperRow(h, t) {
@@ -409,8 +456,11 @@ export default class WhereWasI extends View {
     const idx = this.phase ?? Math.max(0, d.phases.length - 1);
     const p = d.phases[idx];
     const parts = [];
-    if (d.phases.length) parts.push(this.road(d, t, idx));
-    if (p) {
+    const aheadOn = d.ahead && d.ahead.left > 0;
+    if (d.phases.length || aheadOn) parts.push(this.road(d, t, idx));
+    if (this.showAhead && aheadOn) {
+      parts.push(this.aheadList(d.ahead, t));
+    } else if (p) {
       parts.push(v_flex().gap(3).children([
         h_flex().items_center().gap(8).children([
           div().text_size(16).font_semibold().child(p.name),

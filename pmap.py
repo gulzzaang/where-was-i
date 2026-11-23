@@ -886,8 +886,10 @@ def update_main(tr, st):
                     st["words"], st["words_ts"] = txt[:1200], ts
             if t != "tool_use" or b.get("name") not in RELEVANT or b.get("id") in seen:
                 continue
-            seen.add(b.get("id"))
             name, inp = b.get("name"), b.get("input") or {}
+            if name == "Bash" and "git commit" not in (inp.get("command") or ""):
+                continue
+            seen.add(b.get("id"))
             if name == "Skill" and inp.get("skill") in ("superpowers:writing-plans", "superpowers:brainstorming"):
                 st["events"].append(["phase", ts, "설계 · 계획" if "brainstorm" in inp["skill"] else "계획", "", ""])
             elif name == "Write" and PLAN_PATH.search(inp.get("file_path", "")):
@@ -982,9 +984,10 @@ def build_map(sid, tr, hook_state=None):
             st0 = {}
         st = update_main(tr, st0)
         st["v"] = ST_VERSION
-        save_state(mpath, st)
+        dirty = True
     else:
         st = load_state(mpath, {})
+        dirty = False
     st.setdefault("events", [])
     hcache = load_state(hpath, {})
 
@@ -1001,15 +1004,16 @@ def build_map(sid, tr, hook_state=None):
             if meta.get("toolUseId"):
                 metas[meta["toolUseId"]] = meta
 
-    phases = [{"name": "처음", "start": None, "items": [], "goal": "", "src": "", "steps": None}]
+    phases = [{"name": "처음", "start": None, "items": [], "goal": "", "src": "", "steps": None, "plan_ts": None}]
 
     def new_phase(name, ts, src="", goal="", steps=None):
         cur = phases[-1]
         st_ = kst(cur["start"]) if cur["start"] else None
         if (not cur["items"] and cur["name"] == "처음") or (st_ and kst(ts) and (kst(ts) - st_) < timedelta(minutes=30) and not cur["items"]):
-            cur.update(name=name, start=cur["start"] or ts, src=src or cur["src"], goal=goal or cur["goal"], steps=steps or cur.get("steps"))
+            cur.update(name=name, start=cur["start"] or ts, src=src or cur["src"], goal=goal or cur["goal"], steps=steps or cur.get("steps"),
+                       plan_ts=ts if src else cur.get("plan_ts"))
             return
-        phases.append({"name": name, "start": ts, "items": [], "goal": goal, "src": src, "steps": steps})
+        phases.append({"name": name, "start": ts, "items": [], "goal": goal, "src": src, "steps": steps, "plan_ts": ts if src else None})
 
     for e in st["events"]:
         if e[0] == "phase":
@@ -1046,6 +1050,8 @@ def build_map(sid, tr, hook_state=None):
         for h in ph["items"]:
             if h["jsonl"] and os.path.exists(h["jsonl"]):
                 hst = hcache.get(h["jsonl"], {})
+                if "plan_path" not in (hst.get("ev") or {}):
+                    hst = {}  # 계획서 경로를 모으기 전 캐시 → 처음부터 다시
                 if hst.get("mtime") != os.path.getmtime(h["jsonl"]):
                     hst = update_helper(h["jsonl"], hst)
                     hst["mtime"] = os.path.getmtime(h["jsonl"])
@@ -1183,8 +1189,10 @@ def build_map(sid, tr, hook_state=None):
             } for c in cards],
         })
 
+    pc0 = json.dumps(st.get("plan_cache"), sort_keys=True)
     ahead_out = session_ahead(st, phases)
-    save_state(mpath, st)
+    if dirty or json.dumps(st.get("plan_cache"), sort_keys=True) != pc0:
+        save_state(mpath, st)  # 한 번 지을 때 한 번만 쓴다
 
     status = "working" if running_helpers or (last_ts and now_t - (kst(last_ts).timestamp()) < 60) else "idle"
     if asked:
@@ -1234,7 +1242,8 @@ def session_ahead(st, phases):
         steps = cur.get("steps")
     plan = {"source": "계획서", "steps": steps} if steps else None
     pm = st.get("plan_mode") or {}
-    if pm.get("steps") and (not since or (pm.get("ts") or "") >= since):
+    ref = cur.get("plan_ts") or since  # 계획서를 쓴 시각(합쳐진 덩어리는 시작이 더 이르다)
+    if pm.get("steps") and (not ref or (pm.get("ts") or "") >= ref):
         plan = {"source": "계획 모드", "steps": pm["steps"]}
     helpers = [{"key": h.get("key"), "running": h.get("running", False), "ended": h.get("ended", "")}
                for ph in phases[at:] for h in ph["items"]]

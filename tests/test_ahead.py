@@ -133,5 +133,15 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual((out[0]["state"], out[0]["exact"]), ("done", False))
 
 
+class MinorFixTests(unittest.TestCase):
+    def test_key_case_matches_helper(self):
+        out = ahead.guess_states([{"key": "T3A", "title": "셋", "checks": [0, 0]}], [{"key": "T3a", "running": True, "ended": ""}], [], [])
+        self.assertEqual(out[0]["state"], "working")
+
+    def test_checks_inside_code_fence_are_ignored(self):
+        md = "### Task 1: 하나\n- [ ] 진짜\n```\n- [x] 예시\n```\n"
+        self.assertEqual(ahead.plan_steps(md)[0]["checks"], [0, 1])
+
+
 if __name__ == "__main__":
     unittest.main()

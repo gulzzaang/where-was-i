@@ -134,6 +134,59 @@ class AheadMapTests(unittest.TestCase):
         ])
         self.assertIsNone(self.run_map()["ahead"])
 
+    def run_py(self, code):
+        res = subprocess.run([sys.executable, "-c", code], text=True, capture_output=True, env=self.env, timeout=20)
+        self.assertEqual(res.returncode, 0, msg=res.stderr)
+        return res.stdout
+
+    def test_main_cache_saved_once_per_build(self):
+        tr = self.write(self.plan_lines(write_file=True))
+        out = self.run_py(
+            "import sys, json; sys.path.insert(0, %r); import pmap\n"
+            "calls = []\norig = pmap.save_state\n"
+            "pmap.save_state = lambda p, s: (calls.append(p), orig(p, s))\n"
+            "pmap.build_map(%r, %r)\nprint(json.dumps(calls))\n" % (str(REPO), self.sid, str(tr)))
+        self.assertEqual(sum(1 for p in json.loads(out) if p.endswith(".main.json")), 1)
+
+    def test_non_commit_bash_ids_not_remembered(self):
+        self.write([
+            said("2026-11-23T01:00:00.000Z", "명령"),
+            tool_use("2026-11-23T01:01:00.000Z", "bx1", "Bash", {"command": "ls -la"}),
+            tool_use("2026-11-23T01:02:00.000Z", "bx2", "Bash", {"command": "git commit -m \"ADD: 하나\""}),
+        ])
+        self.run_map()
+        st = json.loads((self.home / ".cache" / "where-was-i" / f"{self.sid}.main.json").read_text(encoding="utf-8"))
+        self.assertNotIn("bx1", st["seen"])
+        self.assertIn("bx2", st["seen"])
+
+    def test_plan_mode_before_plan_file_in_merged_phase(self):
+        lines = self.plan_lines(write_file=True)
+        skill = tool_use("2026-11-23T00:50:00.000Z", "sk0", "Skill", {"skill": "superpowers:brainstorming"})
+        early = tool_use("2026-11-23T00:58:00.000Z", "pm0", "ExitPlanMode", {"plan": "# 계획\n\n1. 옛 하나\n2. 옛 둘\n"})
+        self.write([lines[0], skill, early] + lines[1:])
+        self.assertEqual(self.run_map()["ahead"]["source"], "계획서")
+
+    def test_old_helper_cache_without_plan_path_is_reread(self):
+        path = self.home / "proj" / "docs" / "plans" / "2026-11-23-y.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(PLAN, encoding="utf-8")
+        self.write([
+            said("2026-11-23T01:00:00.000Z", "도우미가 계획 쓰기"),
+            tool_use("2026-11-23T01:01:00.000Z", "ag9", "Agent", {"description": "설계 쓰기", "subagent_type": "general-purpose", "prompt": "써"}),
+        ])
+        sub = self.pdir / self.sid / "subagents"
+        sub.mkdir(parents=True)
+        hj = sub / "agent-x.jsonl"
+        hj.write_text(json.dumps(tool_use("2026-11-23T01:02:00.000Z", "hw1", "Write", {"file_path": str(path), "content": PLAN}), ensure_ascii=False) + "\n", encoding="utf-8")
+        (sub / "agent-x.meta.json").write_text(json.dumps({"toolUseId": "ag9", "agentType": "general-purpose"}), encoding="utf-8")
+        cache = self.home / ".cache" / "where-was-i"
+        cache.mkdir(parents=True)
+        old_ev = {"first": None, "last": None, "test_write": None, "fail": None, "impl": None, "pass": None, "commit": None, "steps": None,
+                  "now": "", "last_text": "", "tools": 1, "_pending": {}, "acts": [], "files": ["2026-11-23-y.md"], "commits": 0, "tests": ""}
+        (cache / f"{self.sid}.helpers.json").write_text(json.dumps({str(hj): {"ev": old_ev, "offset": hj.stat().st_size, "mtime": hj.stat().st_mtime}}), encoding="utf-8")
+        a = self.run_map()["ahead"]
+        self.assertEqual((a["source"], a["left"]), ("계획서", 3))
+
     def test_old_cache_is_reread(self):
         tr = self.write([
             said("2026-11-23T01:00:00.000Z", "할 일"),

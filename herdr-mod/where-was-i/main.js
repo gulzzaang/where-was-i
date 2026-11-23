@@ -74,7 +74,11 @@ export default class WhereWasI extends View {
       for (;;) {
         const c = await nextCommand();
         if (c === "toggle") this.convOpen = {};
-        if (c === "ahead") { this.showAhead = !this.showAhead; this.open = {}; }
+        if (c === "ahead") {
+          const has = !!(this.data && this.data.ahead && this.data.ahead.left > 0);
+          this.showAhead = has ? !this.showAhead : false;  // 남은 일이 없으면 켜 두지 않는다
+          this.open = {};
+        }
         cx.notify();
       }
     });
@@ -259,7 +263,7 @@ export default class WhereWasI extends View {
     const c = palette(t);
     const a = d.ahead && d.ahead.left > 0 ? d.ahead : null;
     const chips = d.phases.map((p, i) => {
-        const on = i === idx && !this.showAhead;
+        const on = i === idx && !(this.showAhead && a);
         return h_flex().id(`ph-${i}`).items_center().gap(5).px(8).py(3).rounded(12).border(1)
           .border_color(on ? c.work : t.border).when(on, (s) => s.bg(t.raised)).hover((s) => s.bg(t.raised))
           .on_click((_e, cx) => { this.phase = i; this.open = {}; this.showAhead = false; cx.notify(); })
@@ -290,7 +294,7 @@ export default class WhereWasI extends View {
       : div().size(9).rounded_full().border(1).border_color(t.muted);
     const row = (x) => h_flex().items_center().gap(7).children([
       dot(x.state),
-      x.key ? div().w(26).text_size(11).text_color(t.dim).child(x.key) : div(),
+      x.key ? div().w(34).text_size(11).text_color(t.dim).child(x.key) : div(),
       div().flex_1().min_w(0).truncate().text_size(12).text_color(x.state === "done" ? t.dim : t.foreground).child(x.title),
       x.state === "working" ? div().text_size(11).text_color(c.work).child("하는 중")
         : x.state === "stopped" ? div().text_size(11).text_color(c.ask).child("멈춤") : div(),

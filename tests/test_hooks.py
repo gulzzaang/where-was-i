@@ -299,17 +299,17 @@ class HookIntegrationTests(unittest.TestCase):
         sys.path.insert(0, str(REPO / "scripts"))
         import herdr_setup
 
-        sample_settings = Path("/Users/yuribee/Documents/claude-settings/claude/settings.json")
-        if sample_settings.exists():
-            orig = json.loads(sample_settings.read_text(encoding="utf-8"))
-        else:
-            orig = {
-                "hooks": {
-                    "SessionStart": [{"hooks": [{"type": "command", "command": "bash buddy/session_start.sh", "timeout": 10}]}],
-                    "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 buddy/pre_tool.py", "timeout": 5}]}],
-                },
-                "language": "korean",
-            }
+        # 견본은 시험 안에만 둔다(개인 맥의 설정 파일에 기대면 그 파일이 바뀔 때 시험이 깨진다 — 11-23)
+        orig = {
+            "env": {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "1"},
+            "hooks": {
+                "SessionStart": [{"hooks": [{"type": "command", "command": "bash buddy/session_start.sh", "timeout": 10}]}],
+                "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 buddy/pre_tool.py", "timeout": 5}]},
+                               {"hooks": [{"type": "command", "command": "bash ~/.claude/hooks/korean-only.sh", "timeout": 5}]}],
+                "Stop": [{"hooks": [{"type": "command", "command": "bash ~/.claude/hooks/closing.sh"}]}],
+            },
+            "language": "korean",
+        }
         # 테스트용 settings.json 준비
         spath = self.home / ".claude" / "settings.json"
         spath.parent.mkdir(parents=True, exist_ok=True)

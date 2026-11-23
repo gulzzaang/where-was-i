@@ -81,8 +81,13 @@ def _clean_title(s):
 def plan_steps(md_text):
     """계획 글에서 단계를 뽑는다: Task 제목 → 번호 목록 → ## 제목 순."""
     lines = (md_text or "").splitlines()
-    steps, cur = [], None
+    steps, cur, fence = [], None, False
     for ln in lines:
+        if ln.lstrip().startswith("```"):
+            fence = not fence
+            continue
+        if fence:  # 코드 펜스 안 예시는 단계 · 체크 칸이 아니다
+            continue
         m = TASK_HEAD.match(ln)
         if m:
             cur = {"key": "T" + m.group(1), "title": _clean_title(m.group(2)) or "Task " + m.group(1), "checks": [0, 0]}
@@ -137,7 +142,7 @@ def guess_states(steps, helpers, commits, tasks):
         if state is None and checks[1] > 0 and checks[0] >= checks[1]:
             state = "done"
         if state is None and n:
-            mine = [h for h in helpers if h.get("key") == s.get("key")]
+            mine = [h for h in helpers if (h.get("key") or "").lower() == s["key"].lower()]
             if mine:
                 last = mine[-1]
                 if last.get("running"):

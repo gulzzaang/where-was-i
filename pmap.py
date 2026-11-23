@@ -19,6 +19,9 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ahead  # noqa: E402  남은 일을 뽑고 고르는 순수 함수
+
 HOME = os.path.expanduser("~")
 CLAUDE = os.path.join(HOME, ".claude")
 KST = timezone(timedelta(hours=9))
@@ -38,6 +41,8 @@ REVIEW = re.compile(r"(검토|review|리뷰)", re.I)
 FIX = re.compile(r"(고침|고치기|고쳐|반영|fix)", re.I)
 RESEARCH = re.compile(r"(조사|파악|설계|대조|Explore|찾기)", re.I)
 PLAN_DESC = re.compile(r"계획서")
+PLAN_PATH = re.compile(r"(plans?/|plan-|계획)[^/]*\.md$")
+ST_VERSION = 2  # 세션 캐시 꼴 판 — 바뀌면 처음부터 한 번 다시 읽는다
 
 
 def hangul(s):
@@ -562,7 +567,7 @@ def read_helper(jsonl):
 def new_ev():
     return {"first": None, "last": None, "test_write": None, "fail": None, "impl": None, "pass": None,
             "commit": None, "steps": None, "now": "", "last_text": "", "tools": 0, "_pending": {}, "acts": [],
-            "files": [], "commits": 0, "tests": ""}
+            "files": [], "commits": 0, "tests": "", "plan_path": ""}
 
 
 def scan_lines(lines, ev=None):
@@ -589,6 +594,8 @@ def scan_lines(lines, ev=None):
                 if name in ("Edit", "Write", "MultiEdit"):
                     p = inp.get("file_path", "")
                     base = os.path.basename(p)
+                    if name == "Write" and PLAN_PATH.search(p):
+                        ev["plan_path"] = p
                     fl = ev.setdefault("files", [])
                     if base and base not in fl and len(fl) < 40:
                         fl.append(base)
@@ -730,7 +737,16 @@ def save_state(path, st):
     os.replace(path + ".tmp", path)
 
 
-RELEVANT = {"Skill", "Write", "AskUserQuestion", "Agent"}
+RELEVANT = {"Skill", "Write", "AskUserQuestion", "Agent", "TaskCreate", "TaskUpdate", "TodoWrite", "ExitPlanMode", "Bash"}
+
+
+def commit_message(cmd):
+    """git commit 명령에서 커밋 글 첫 줄을 꺼낸다(-m \"…\" 또는 heredoc)."""
+    m = re.search(r"-m\s+([\"'])(.*?)\1", cmd or "", re.S)
+    if m:
+        return m.group(2).strip().splitlines()[0] if m.group(2).strip() else ""
+    m = re.search(r"<<-?\s*['\"]?(\w+)['\"]?\s*\n(.*?)\n", cmd or "", re.S)
+    return m.group(2).strip() if m else ""
 
 
 def open_turn(st, ts, said, asked, kind):
@@ -813,6 +829,8 @@ def update_main(tr, st):
                         if "Async agent launched" not in r and "launched successfully" not in r:
                             done_ids.append(b.get("tool_use_id"))
                             st.setdefault("ended", {})[b.get("tool_use_id")] = "completed"
+                    elif b.get("type") == "tool_result" and b.get("tool_use_id") in (st.get("tasks") or {}).get("pending", {}):
+                        ahead.on_task_result(st["tasks"], b.get("tool_use_id"), text_of(b.get("content")))
                     elif b.get("type") == "text":
                         note += b.get("text", "")
             for m3 in re.finditer(r"<tool-use-id>([^<]+)</tool-use-id>[\s\S]{0,800}?<status>completed</status>", note):
@@ -868,12 +886,12 @@ def update_main(tr, st):
             name, inp = b.get("name"), b.get("input") or {}
             if name == "Skill" and inp.get("skill") in ("superpowers:writing-plans", "superpowers:brainstorming"):
                 st["events"].append(["phase", ts, "설계 · 계획" if "brainstorm" in inp["skill"] else "계획", "", ""])
-            elif name == "Write" and re.search(r"(plans?/|plan-|계획)[^/]*\.md$", inp.get("file_path", "")):
+            elif name == "Write" and PLAN_PATH.search(inp.get("file_path", "")):
                 c = inp.get("content", "")
                 m2 = re.search(r"^#\s+(.+)$", c, re.M)
                 goal = re.search(r"\*\*Goal:\*\*\s*(.+)", c)
                 st["events"].append(["phase", ts, short(m2.group(1) if m2 else os.path.basename(inp["file_path"]), 60),
-                                     inp["file_path"], first_sentence(goal.group(1), 160) if goal else ""])
+                                     inp["file_path"], first_sentence(goal.group(1), 160) if goal else "", ahead.plan_steps(c)])
             elif name == "AskUserQuestion":
                 qs = inp.get("questions") or []
                 st["asked"] = short(qs[0].get("question") if qs else "질문", 120)
@@ -888,6 +906,15 @@ def update_main(tr, st):
                 st["events"].append(["agent", ts, b.get("id"), inp.get("description") or "", inp.get("subagent_type") or "",
                                      first_sentence(re.sub(r"^너는[^.]*?\.\s*", "", inp.get("prompt") or ""), 150),
                                      inp.get("model") or ""])
+            elif name in ("TaskCreate", "TaskUpdate", "TodoWrite"):
+                ahead.on_task_tool(st.setdefault("tasks", ahead.new_tasks()), b.get("id"), name, inp, ts)
+            elif name == "ExitPlanMode":
+                st["plan_mode"] = {"ts": ts, "steps": ahead.plan_steps(inp.get("plan") or "")}
+            elif name == "Bash" and "git commit" in (inp.get("command") or ""):
+                msg = commit_message(inp.get("command"))
+                if msg:
+                    st.setdefault("commits", []).append(msg)
+                    del st["commits"][:-100]
     st["seen"] = list(seen)
     return st
 
@@ -946,7 +973,11 @@ def build_map(sid, tr, hook_state=None):
     os.makedirs(CACHE, exist_ok=True)
     mpath, hpath = os.path.join(CACHE, safe_sid(sid) + ".main.json"), os.path.join(CACHE, safe_sid(sid) + ".helpers.json")
     if tr and os.path.exists(tr):
-        st = update_main(tr, load_state(mpath, {}))
+        st0 = load_state(mpath, {})
+        if st0.get("v") != ST_VERSION:
+            st0 = {}
+        st = update_main(tr, st0)
+        st["v"] = ST_VERSION
         save_state(mpath, st)
     else:
         st = load_state(mpath, {})
@@ -966,19 +997,19 @@ def build_map(sid, tr, hook_state=None):
             if meta.get("toolUseId"):
                 metas[meta["toolUseId"]] = meta
 
-    phases = [{"name": "처음", "start": None, "items": [], "goal": "", "src": ""}]
+    phases = [{"name": "처음", "start": None, "items": [], "goal": "", "src": "", "steps": None}]
 
-    def new_phase(name, ts, src="", goal=""):
+    def new_phase(name, ts, src="", goal="", steps=None):
         cur = phases[-1]
         st_ = kst(cur["start"]) if cur["start"] else None
         if (not cur["items"] and cur["name"] == "처음") or (st_ and kst(ts) and (kst(ts) - st_) < timedelta(minutes=30) and not cur["items"]):
-            cur.update(name=name, start=cur["start"] or ts, src=src or cur["src"], goal=goal or cur["goal"])
+            cur.update(name=name, start=cur["start"] or ts, src=src or cur["src"], goal=goal or cur["goal"], steps=steps or cur.get("steps"))
             return
-        phases.append({"name": name, "start": ts, "items": [], "goal": goal, "src": src})
+        phases.append({"name": name, "start": ts, "items": [], "goal": goal, "src": src, "steps": steps})
 
     for e in st["events"]:
         if e[0] == "phase":
-            new_phase(e[2], e[1], e[3], e[4])
+            new_phase(e[2], e[1], e[3], e[4], e[5] if len(e) > 5 else None)
         elif e[0] == "agent":
             _, ts, bid, desc, atype, job, model = (e + [""])[:7]
             meta = metas.get(bid) or {}
@@ -1047,6 +1078,7 @@ def build_map(sid, tr, hook_state=None):
             h["ended"] = ended or ""
             h["after"] = (st.get("after") or {}).get(h["id"], "")
             h["report"] = ev.get("report", "")
+            h["plan_path"] = ev.get("plan_path", "")
             stopped = ended and ended != "completed"
             h.update(running=running, end=ev["last"],
                      now=(f"멈춤({ended})" if stopped else (ev["now"] or ("일하는 중" if running else "끝"))),
@@ -1147,6 +1179,9 @@ def build_map(sid, tr, hook_state=None):
             } for c in cards],
         })
 
+    ahead_out = session_ahead(st, phases[-1])
+    save_state(mpath, st)
+
     status = "working" if running_helpers or (last_ts and now_t - (kst(last_ts).timestamp()) < 60) else "idle"
     if asked:
         status = "asking"
@@ -1162,6 +1197,7 @@ def build_map(sid, tr, hook_state=None):
                  "mins": int((now_t - kst(h["start"]).timestamp()) // 60) if kst(h["start"]) else 0}
                 for h in running_helpers],
         "phases": out_phases,
+        "ahead": ahead_out,
         "built": datetime.now(KST).strftime("%H:%M:%S"),
         "turns": [turn_out(tn, False) for tn in (st.get("turns") or [])],
         "direct": {"prompt": (first_sentence(last_prompt, 90) if not is_short(last_prompt) or not (st.get("turns") or [{}])[-1].get("asked")
@@ -1169,6 +1205,31 @@ def build_map(sid, tr, hook_state=None):
                    "since": hm(last_prompt_ts), "since_ts": last_prompt_ts,
                    "ev": main_ev},
     }
+
+
+def session_ahead(st, cur):
+    """지금 덩어리(cur)의 계획 · 할 일 목록에서 남은 일을 고른다. 계획서는 수정 시각이 바뀔 때만 다시 읽는다."""
+    since = cur.get("start")
+    path = cur.get("src") or next((h.get("plan_path") for h in cur["items"] if h.get("plan_path")), "")
+    steps = None
+    if path and os.path.exists(path):
+        pc, mt = st.get("plan_cache") or {}, os.path.getmtime(path)
+        if pc.get("path") != path or pc.get("mtime") != mt:
+            try:
+                txt = open(path, encoding="utf-8", errors="ignore").read()
+            except OSError:
+                txt = ""
+            pc = st["plan_cache"] = {"path": path, "mtime": mt, "steps": ahead.plan_steps(txt)}
+        steps = pc.get("steps")
+    if not steps:
+        steps = cur.get("steps")
+    plan = {"source": "계획서", "steps": steps} if steps else None
+    pm = st.get("plan_mode") or {}
+    if pm.get("steps") and (not since or (pm.get("ts") or "") >= since):
+        plan = {"source": "계획 모드", "steps": pm["steps"]}
+    helpers = [{"key": h.get("key"), "running": h.get("running", False), "ended": h.get("ended", "")} for h in cur["items"]]
+    tasks = ahead.task_list(st.get("tasks") or ahead.new_tasks(), since)
+    return ahead.build_ahead(plan, tasks, helpers, st.get("commits") or [])
 
 
 def cached_map(sid, tr, hook_state=None):

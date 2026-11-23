@@ -58,3 +58,45 @@ def task_list(tasks, since_ts):
         return [{"key": None, "title": x["title"], "state": x["state"]} for x in todo["list"]]
     return [{"key": None, "title": v["title"], "state": v["state"]}
             for _, v in items if since_ts is None or (v["ts"] or "") >= since_ts]
+
+
+# ── 계획서 · 계획 모드 계획 ───────────────────────────────────────
+
+TASK_HEAD = re.compile(r"^#{2,3}\s*Task\s*(\d+[A-Za-z]?)\b\s*[:：—–\-.]?\s*(.*)$")
+ANY_HEAD = re.compile(r"^(#{1,3})\s+(.+)$")
+CHECK = re.compile(r"^\s*[-*]\s*\[( |x|X)\]")
+NUMBERED = re.compile(r"^(\d+)[.)]\s+(.+)$")
+
+
+def _clean_title(s):
+    s = re.sub(r"\*\*|__|`", "", s or "").strip()
+    s = re.sub(r"[:：]\s*$", "", s).strip()
+    return s[:80]
+
+
+def plan_steps(md_text):
+    """계획 글에서 단계를 뽑는다: Task 제목 → 번호 목록 → ## 제목 순."""
+    lines = (md_text or "").splitlines()
+    steps, cur = [], None
+    for ln in lines:
+        m = TASK_HEAD.match(ln)
+        if m:
+            cur = {"key": "T" + m.group(1), "title": _clean_title(m.group(2)) or "Task " + m.group(1), "checks": [0, 0]}
+            steps.append(cur)
+            continue
+        if cur is not None:
+            if ANY_HEAD.match(ln) and len(ANY_HEAD.match(ln).group(1)) <= 3:
+                cur = None
+                continue
+            c = CHECK.match(ln)
+            if c:
+                cur["checks"][1] += 1
+                if c.group(1) in "xX":
+                    cur["checks"][0] += 1
+    if steps:
+        return steps
+    nums = [_clean_title(m.group(2)) for m in (NUMBERED.match(ln) for ln in lines) if m]
+    if nums:
+        return [{"key": None, "title": t, "checks": [0, 0]} for t in nums if t]
+    heads = [_clean_title(m.group(2)) for m in (ANY_HEAD.match(ln) for ln in lines) if m and len(m.group(1)) == 2]
+    return [{"key": None, "title": t, "checks": [0, 0]} for t in heads if t]

@@ -49,5 +49,30 @@ class TaskListTests(unittest.TestCase):
         self.assertEqual(ahead.task_list(t, None), [{"key": None, "title": "README", "state": "todo"}])
 
 
+PLAN_MD = """# 추천 도우미 계획
+### Task 1: 최신 main 따라잡기
+- [x] **Step 1:** 합치기
+- [ ] **Step 2:** 시험
+### Task 2 — 칸 이름 바꾸기
+- [ ] 바꾸기
+"""
+
+
+class PlanStepsTests(unittest.TestCase):
+    def test_plan_task_headings_and_checks(self):
+        self.assertEqual(ahead.plan_steps(PLAN_MD), [
+            {"key": "T1", "title": "최신 main 따라잡기", "checks": [1, 2]},
+            {"key": "T2", "title": "칸 이름 바꾸기", "checks": [0, 1]},
+        ])
+
+    def test_plan_mode_numbered_list(self):
+        steps = ahead.plan_steps("# 계획\n\n1. 설정 읽기\n2. 칸 고치기\n   1. 세부\n")
+        self.assertEqual([s["title"] for s in steps], ["설정 읽기", "칸 고치기"])
+        self.assertTrue(all(s["key"] is None for s in steps))
+
+    def test_plan_without_steps_gives_empty(self):
+        self.assertEqual(ahead.plan_steps("그냥 설명 글입니다."), [])
+
+
 if __name__ == "__main__":
     unittest.main()

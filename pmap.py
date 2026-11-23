@@ -1461,6 +1461,7 @@ def build_codex_map(path, alive):
     turns, model, sid, first_ts, last_ts = [], "", "", None, None
     cur, pending = None, {}
     words, words_ts = "", None
+    codex_steps = []  # 마지막 update_plan(Codex 가 적은 단계 · 상태)
     for d in iter_jsonl(path):
         ts = d.get("timestamp")
         if ts:
@@ -1480,6 +1481,10 @@ def build_codex_map(path, alive):
             it = p.get("item") or {}
             if it.get("type") == "UserMessage" and not cur["prompt"]:
                 cur["prompt"] = text_of(it.get("content"))
+        elif t == "response_item" and pt in ("function_call", "custom_tool_call") and p.get("name") == "update_plan":
+            got = ahead.codex_plan(p.get("arguments") if pt == "function_call" else p.get("input"))
+            if got:
+                codex_steps = got
         elif t == "response_item" and pt == "custom_tool_call" and cur is not None:
             cmd = codex_cmd(p.get("input"))
             act = codex_act(cmd)
@@ -1547,6 +1552,7 @@ def build_codex_map(path, alive):
         "phases": [{"name": f"Codex · {mname}", "date": md(first_ts), "goal": "", "src": "", "total": len(cards),
                     "done": sum(1 for c in cards if c["state"] == "done"), "state": "working" if working else "done",
                     "cards": cards}] if cards else [],
+        "ahead": ahead.build_ahead(None, codex_steps, [], [], task_source="Codex 계획"),
         "built": datetime.now(KST).strftime("%H:%M:%S"),
     }
 

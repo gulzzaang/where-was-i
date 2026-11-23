@@ -187,6 +187,23 @@ class AheadMapTests(unittest.TestCase):
         a = self.run_map()["ahead"]
         self.assertEqual((a["source"], a["left"]), ("계획서", 3))
 
+    def test_codex_update_plan_reaches_map(self):
+        rollout = Path(self.tmp) / "rollout-x.jsonl"
+        rows = [
+            {"timestamp": "2026-11-23T01:00:00.000Z", "type": "session_meta", "payload": {"id": "cx1"}},
+            {"timestamp": "2026-11-23T01:00:01.000Z", "type": "event_msg", "payload": {"type": "task_started"}},
+            {"timestamp": "2026-11-23T01:00:02.000Z", "type": "response_item", "payload": {
+                "type": "function_call", "name": "update_plan", "call_id": "c1",
+                "arguments": json.dumps({"plan": [{"step": "읽기", "status": "completed"}, {"step": "고치기", "status": "in_progress"},
+                                                  {"step": "시험", "status": "pending"}]}, ensure_ascii=False)}},
+        ]
+        rollout.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+        res = subprocess.run([sys.executable, PMAP_SCRIPT, "map", "--codex-file", str(rollout)],
+                             text=True, capture_output=True, env=self.env, timeout=20)
+        self.assertEqual(res.returncode, 0, msg=res.stderr)
+        a = json.loads(res.stdout)["ahead"]
+        self.assertEqual((a["source"], a["left"], a["next"]), ("Codex 계획", 2, "고치기"))
+
     def test_old_cache_is_reread(self):
         tr = self.write([
             said("2026-11-23T01:00:00.000Z", "할 일"),

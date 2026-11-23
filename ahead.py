@@ -39,6 +39,20 @@ def on_task_tool(tasks, tool_id, name, inp, ts):
         ]}
 
 
+def codex_plan(args):
+    """Codex 의 update_plan 인자(JSON 글 또는 dict) → 할 일 목록 꼴. 깨졌으면 []."""
+    import json
+    try:
+        d = json.loads(args) if isinstance(args, str) else (args or {})
+    except ValueError:
+        return []
+    out = []
+    for x in (d.get("plan") or []) if isinstance(d, dict) else []:
+        if isinstance(x, dict) and str(x.get("step") or "").strip():
+            out.append({"key": None, "title": str(x["step"]).strip()[:80], "state": STATE_OF.get(x.get("status"), "todo")})
+    return out
+
+
 def on_task_result(tasks, tool_id, text):
     """TaskCreate 결과 글에서 번호를 얻어 목록에 올린다."""
     pend = tasks["pending"].pop(tool_id, None)
@@ -173,15 +187,15 @@ def _pack(source, guess, items):
             "next_exact": bool(first.get("exact"))}
 
 
-def build_ahead(plan, tasks, helpers, commits):
+def build_ahead(plan, tasks, helpers, commits, task_source="할 일 목록"):
     """계획(계획서 · 계획 모드)에 남은 단계가 있으면 그것, 아니면 할 일 목록, 둘 다 없으면 None."""
     if plan and plan.get("steps") and tasks and not any(s.get("key") for s in plan["steps"]):
         # 번호 없는 계획은 끝을 짐작할 신호가 없다 → 정확한 할 일 목록이 있으면 그것만 본다
-        return _pack("할 일 목록", False, [dict(t, exact=True) for t in tasks])
+        return _pack(task_source, False, [dict(t, exact=True) for t in tasks])
     if plan and plan.get("steps"):
         packed = _pack(plan.get("source") or "계획서", True, guess_states(plan["steps"], helpers, commits, tasks))
         if packed:
             return packed
     if tasks:
-        return _pack("할 일 목록", False, [dict(t, exact=True) for t in tasks])
+        return _pack(task_source, False, [dict(t, exact=True) for t in tasks])
     return None

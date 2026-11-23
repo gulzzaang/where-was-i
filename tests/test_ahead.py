@@ -133,6 +133,21 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual((out[0]["state"], out[0]["exact"]), ("done", False))
 
 
+class CodexPlanTests(unittest.TestCase):
+    def test_codex_update_plan_arguments(self):
+        args = '{"explanation": "x", "plan": [{"step": "읽기", "status": "completed"}, {"step": "고치기", "status": "in_progress"}, {"step": "시험", "status": "pending"}]}'
+        self.assertEqual(ahead.codex_plan(args), [
+            {"key": None, "title": "읽기", "state": "done"},
+            {"key": None, "title": "고치기", "state": "working"},
+            {"key": None, "title": "시험", "state": "todo"},
+        ])
+        self.assertEqual(ahead.codex_plan("깨진 글"), [])
+
+    def test_build_ahead_task_source_label(self):
+        a = ahead.build_ahead(None, ahead.codex_plan('{"plan": [{"step": "시험", "status": "pending"}]}'), [], [], task_source="Codex 계획")
+        self.assertEqual((a["source"], a["guess"], a["next"]), ("Codex 계획", False, "시험"))
+
+
 class MinorFixTests(unittest.TestCase):
     def test_key_case_matches_helper(self):
         out = ahead.guess_states([{"key": "T3A", "title": "셋", "checks": [0, 0]}], [{"key": "T3a", "running": True, "ended": ""}], [], [])

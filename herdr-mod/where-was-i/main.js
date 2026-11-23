@@ -284,7 +284,7 @@ export default class WhereWasI extends View {
 
   aheadList(a, t) {
     const c = palette(t);
-    const tag = a.source === "할 일 목록" ? "할 일 목록에서" : `${a.source}에서 · 끝남은 짐작`;
+    const tag = a.guess ? `${a.source}에서 · 끝남은 짐작` : `${a.source}에서`;
     const left = a.items.filter((x) => x.state !== "done");
     const done = a.items.filter((x) => x.state === "done");
     // 움직이지 않는 기호만: 대기 빈 원 · 하는 중 채운 원 · 멈춤 노란 원 · 끝 흐린 원

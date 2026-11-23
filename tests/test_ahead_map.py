@@ -110,6 +110,30 @@ class AheadMapTests(unittest.TestCase):
         self.write([said("2026-11-23T01:00:00.000Z", "그냥 질문")])
         self.assertIsNone(self.run_map()["ahead"])
 
+    def test_heredoc_commit_marks_task_done_only_after_plan(self):
+        lines = self.plan_lines(write_file=True)
+        old = tool_use("2026-11-23T00:30:00.000Z", "b0", "Bash", {"command": "git commit -m \"ADD: Task 3 예전 일\""})
+        new = tool_use("2026-11-23T01:10:00.000Z", "b1", "Bash",
+                       {"command": "git commit -m \"$(cat <<'EOF'\nADD: Task 2 칸 고침\n\n본문\nEOF\n)\""})
+        self.write([lines[0], old] + lines[1:] + [new])
+        a = self.run_map()["ahead"]
+        self.assertEqual([x["state"] for x in a["items"]], ["done", "done", "todo"])
+
+    def test_plan_review_helper_keeps_plan(self):
+        lines = self.plan_lines(write_file=True)
+        lines.append(tool_use("2026-11-23T02:30:00.000Z", "ag2", "Agent", {"description": "계획서 검토", "subagent_type": "general-purpose", "prompt": "봐"}))
+        self.write(lines)
+        a = self.run_map()["ahead"]
+        self.assertEqual((a["source"], a["left"]), ("계획서", 2))
+
+    def test_rejected_plan_mode_is_dropped(self):
+        self.write([
+            said("2026-11-23T01:00:00.000Z", "계획 모드로"),
+            tool_use("2026-11-23T01:01:00.000Z", "pm1", "ExitPlanMode", {"plan": "# 계획\n\n1. 설정 읽기\n2. 칸 고치기\n"}),
+            tool_result("2026-11-23T01:02:00.000Z", "pm1", "The user doesn't want to proceed with this tool use. The tool use was rejected."),
+        ])
+        self.assertIsNone(self.run_map()["ahead"])
+
     def test_old_cache_is_reread(self):
         tr = self.write([
             said("2026-11-23T01:00:00.000Z", "할 일"),

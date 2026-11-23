@@ -42,7 +42,7 @@ FIX = re.compile(r"(고침|고치기|고쳐|반영|fix)", re.I)
 RESEARCH = re.compile(r"(조사|파악|설계|대조|Explore|찾기)", re.I)
 PLAN_DESC = re.compile(r"계획서")
 PLAN_PATH = re.compile(r"(plans?/|plan-|계획)[^/]*\.md$")
-ST_VERSION = 2  # 세션 캐시 꼴 판 — 바뀌면 처음부터 한 번 다시 읽는다
+ST_VERSION = 3  # 세션 캐시 꼴 판 — 바뀌면 처음부터 한 번 다시 읽는다
 
 
 def hangul(s):
@@ -742,11 +742,11 @@ RELEVANT = {"Skill", "Write", "AskUserQuestion", "Agent", "TaskCreate", "TaskUpd
 
 def commit_message(cmd):
     """git commit 명령에서 커밋 글 첫 줄을 꺼낸다(-m \"…\" 또는 heredoc)."""
-    m = re.search(r"-m\s+([\"'])(.*?)\1", cmd or "", re.S)
+    m = re.search(r"<<-?\s*['\"]?(\w+)['\"]?\s*\n\s*(\S[^\n]*)", cmd or "")
     if m:
-        return m.group(2).strip().splitlines()[0] if m.group(2).strip() else ""
-    m = re.search(r"<<-?\s*['\"]?(\w+)['\"]?\s*\n(.*?)\n", cmd or "", re.S)
-    return m.group(2).strip() if m else ""
+        return m.group(2).strip()
+    m = re.search(r"-m\s+([\"'])(.*?)\1", cmd or "", re.S)
+    return m.group(2).strip().splitlines()[0] if m and m.group(2).strip() else ""
 
 
 def open_turn(st, ts, said, asked, kind):
@@ -829,6 +829,10 @@ def update_main(tr, st):
                         if "Async agent launched" not in r and "launched successfully" not in r:
                             done_ids.append(b.get("tool_use_id"))
                             st.setdefault("ended", {})[b.get("tool_use_id")] = "completed"
+                    elif b.get("type") == "tool_result" and b.get("tool_use_id") and b.get("tool_use_id") == (st.get("plan_mode") or {}).get("id"):
+                        r = text_of(b.get("content")).lstrip()
+                        if r.startswith(("The user doesn't want", "User rejected", "[Request interrupted")):
+                            st.pop("plan_mode", None)
                     elif b.get("type") == "tool_result" and b.get("tool_use_id") in (st.get("tasks") or {}).get("pending", {}):
                         ahead.on_task_result(st["tasks"], b.get("tool_use_id"), text_of(b.get("content")))
                     elif b.get("type") == "text":
@@ -909,11 +913,11 @@ def update_main(tr, st):
             elif name in ("TaskCreate", "TaskUpdate", "TodoWrite"):
                 ahead.on_task_tool(st.setdefault("tasks", ahead.new_tasks()), b.get("id"), name, inp, ts)
             elif name == "ExitPlanMode":
-                st["plan_mode"] = {"ts": ts, "steps": ahead.plan_steps(inp.get("plan") or "")}
+                st["plan_mode"] = {"id": b.get("id"), "ts": ts, "steps": ahead.plan_steps(inp.get("plan") or "")}
             elif name == "Bash" and "git commit" in (inp.get("command") or ""):
                 msg = commit_message(inp.get("command"))
                 if msg:
-                    st.setdefault("commits", []).append(msg)
+                    st.setdefault("commits", []).append([ts, msg])
                     del st["commits"][:-100]
     st["seen"] = list(seen)
     return st
@@ -1179,7 +1183,7 @@ def build_map(sid, tr, hook_state=None):
             } for c in cards],
         })
 
-    ahead_out = session_ahead(st, phases[-1])
+    ahead_out = session_ahead(st, phases)
     save_state(mpath, st)
 
     status = "working" if running_helpers or (last_ts and now_t - (kst(last_ts).timestamp()) < 60) else "idle"
@@ -1207,10 +1211,15 @@ def build_map(sid, tr, hook_state=None):
     }
 
 
-def session_ahead(st, cur):
-    """지금 덩어리(cur)의 계획 · 할 일 목록에서 남은 일을 고른다. 계획서는 수정 시각이 바뀔 때만 다시 읽는다."""
+def session_ahead(st, phases):
+    """가장 최근 계획 덩어리(계획서가 있는 덩어리, 없으면 마지막 덩어리)의 계획 · 할 일 목록에서 남은 일을 고른다.
+    계획서는 수정 시각이 바뀔 때만 다시 읽는다. 그 뒤에 「계획서 검토」 같은 덩어리가 생겨도 계획을 잃지 않는다."""
+    def plan_of(ph):
+        return ph.get("src") or next((h.get("plan_path") for h in ph["items"] if h.get("plan_path")), "")
+    at = next((i for i in range(len(phases) - 1, -1, -1) if plan_of(phases[i]) or phases[i].get("steps")), len(phases) - 1)
+    cur = phases[at]
     since = cur.get("start")
-    path = cur.get("src") or next((h.get("plan_path") for h in cur["items"] if h.get("plan_path")), "")
+    path = plan_of(cur)
     steps = None
     if path and os.path.exists(path):
         pc, mt = st.get("plan_cache") or {}, os.path.getmtime(path)
@@ -1227,9 +1236,11 @@ def session_ahead(st, cur):
     pm = st.get("plan_mode") or {}
     if pm.get("steps") and (not since or (pm.get("ts") or "") >= since):
         plan = {"source": "계획 모드", "steps": pm["steps"]}
-    helpers = [{"key": h.get("key"), "running": h.get("running", False), "ended": h.get("ended", "")} for h in cur["items"]]
+    helpers = [{"key": h.get("key"), "running": h.get("running", False), "ended": h.get("ended", "")}
+               for ph in phases[at:] for h in ph["items"]]
     tasks = ahead.task_list(st.get("tasks") or ahead.new_tasks(), since)
-    return ahead.build_ahead(plan, tasks, helpers, st.get("commits") or [])
+    commits = [c[1] for c in (st.get("commits") or []) if isinstance(c, list) and (not since or (c[0] or "") >= since)]
+    return ahead.build_ahead(plan, tasks, helpers, commits)
 
 
 def cached_map(sid, tr, hook_state=None):

@@ -62,7 +62,11 @@ def task_list(tasks, since_ts):
 
 # ── 계획서 · 계획 모드 계획 ───────────────────────────────────────
 
-TASK_HEAD = re.compile(r"^#{2,3}\s*Task\s*(\d+[A-Za-z]?)\b\s*[:：—–\-.]?\s*(.*)$")
+TASK_HEAD = re.compile(r"^#{2,3}\s*Task\s*(\d+[A-Za-z]?)(?!\d)(?!\.\d)\s*[:：—–\-.]?\s*(.*)$")
+# 흔한 구역 이름은 단계가 아니다(계획 모드 계획의 Context · Verification 등)
+SECTION_NAMES = {"context", "background", "goal", "goals", "overview", "summary", "approach", "verification",
+                 "testing", "tests", "notes", "risks", "open questions", "references", "배경", "목표", "개요",
+                 "요약", "확인", "검증", "시험", "메모", "참고", "위험", "질문"}
 ANY_HEAD = re.compile(r"^(#{1,3})\s+(.+)$")
 CHECK = re.compile(r"^\s*[-*]\s*\[( |x|X)\]")
 NUMBERED = re.compile(r"^(\d+)[.)]\s+(.+)$")
@@ -95,11 +99,12 @@ def plan_steps(md_text):
                     cur["checks"][0] += 1
     if steps:
         return steps
-    nums = [_clean_title(m.group(2)) for m in (NUMBERED.match(ln) for ln in lines) if m]
-    if nums:
-        return [{"key": None, "title": t, "checks": [0, 0]} for t in nums if t]
-    heads = [_clean_title(m.group(2)) for m in (ANY_HEAD.match(ln) for ln in lines) if m and len(m.group(1)) == 2]
-    return [{"key": None, "title": t, "checks": [0, 0]} for t in heads if t]
+    nums = [t for t in (_clean_title(m.group(2)) for m in (NUMBERED.match(ln) for ln in lines) if m) if t]
+    if len(nums) >= 2:
+        return [{"key": None, "title": t, "checks": [0, 0]} for t in nums]
+    heads = [t for t in (_clean_title(m.group(2)) for m in (ANY_HEAD.match(ln) for ln in lines) if m and len(m.group(1)) == 2)
+             if t and t.lower() not in SECTION_NAMES]
+    return [{"key": None, "title": t, "checks": [0, 0]} for t in heads] if len(heads) >= 2 else []
 
 
 # ── 끝남 짐작과 고르기 ─────────────────────────────────────────────
@@ -108,8 +113,14 @@ def _num(key):
     return key[1:] if key and key.startswith("T") else None
 
 
+def _task_re(n, bare_t=False):
+    """Task N(또는 TN) — 앞뒤가 영숫자가 아니면 된다(한글 조사가 바로 붙어도 됨, T10 은 T1 이 아님)."""
+    head = r"(?:Task\s*|T)" if bare_t else r"Task\s*"
+    return re.compile(r"(?<![0-9A-Za-z])" + head + re.escape(n) + r"(?![0-9A-Za-z])")
+
+
 def _mentions(text, n):
-    return bool(re.search(r"\bTask\s*" + re.escape(n) + r"\b", text or "")) or bool(re.search(r"\bT" + re.escape(n) + r"\b", text or ""))
+    return bool(_task_re(n, bare_t=True).search(text or ""))
 
 
 def guess_states(steps, helpers, commits, tasks):
@@ -119,7 +130,7 @@ def guess_states(steps, helpers, commits, tasks):
         n = _num(s.get("key"))
         state, exact = None, False
         if n:
-            hit = next((t for t in tasks if re.search(r"\bTask\s*" + re.escape(n) + r"\b", t.get("title") or "")), None)
+            hit = next((t for t in tasks if _task_re(n).search(t.get("title") or "")), None)
             if hit:
                 state, exact = hit["state"], True
         checks = s.get("checks") or [0, 0]
@@ -141,7 +152,7 @@ def guess_states(steps, helpers, commits, tasks):
     later = False
     for s in reversed(out):
         if s["state"] == "todo" and later:
-            s["state"] = "done"
+            s["state"], s["exact"] = "done", False
         if s["state"] in ("working", "done", "stopped"):
             later = True
     return out
@@ -153,11 +164,15 @@ def _pack(source, guess, items):
         return None
     first = next((x for x in left if x["state"] == "working"), None) or next((x for x in left if x["state"] == "todo"), None) or left[0]
     return {"source": source, "guess": guess, "items": items, "left": len(left),
-            "next": (first["key"] + " " + first["title"]) if first.get("key") else first["title"]}
+            "next": (first["key"] + " " + first["title"]) if first.get("key") else first["title"],
+            "next_exact": bool(first.get("exact"))}
 
 
 def build_ahead(plan, tasks, helpers, commits):
     """계획(계획서 · 계획 모드)에 남은 단계가 있으면 그것, 아니면 할 일 목록, 둘 다 없으면 None."""
+    if plan and plan.get("steps") and tasks and not any(s.get("key") for s in plan["steps"]):
+        # 번호 없는 계획은 끝을 짐작할 신호가 없다 → 정확한 할 일 목록이 있으면 그것만 본다
+        return _pack("할 일 목록", False, [dict(t, exact=True) for t in tasks])
     if plan and plan.get("steps"):
         packed = _pack(plan.get("source") or "계획서", True, guess_states(plan["steps"], helpers, commits, tasks))
         if packed:

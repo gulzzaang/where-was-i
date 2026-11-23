@@ -225,7 +225,7 @@ export default class WhereWasI extends View {
     const a = d.ahead;
     if (a && a.left > 0) rows.push(h_flex().items_center().gap(6).children([
       div().size(9).rounded_full().border(1).border_color(t.muted),
-      div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(`다음 · ${a.next}`),
+      div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(`다음 · ${a.next}${a.guess && !a.next_exact ? " · 짐작" : ""}`),
     ]));
     if (d.asked) rows.push(h_flex().items_start().gap(6).px(8).py(5).rounded(7).bg(t.raised).border(1).border_color(c.ask).children([
       this.mark("asking", t, 12),

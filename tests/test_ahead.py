@@ -110,5 +110,28 @@ class GuessTests(unittest.TestCase):
         self.assertIsNone(ahead.build_ahead(None, [{"key": None, "title": "끝난 일", "state": "done"}], [], []))
 
 
+class ReviewFixTests(unittest.TestCase):
+    def test_keyless_plan_yields_to_task_list(self):
+        plan = {"source": "계획 모드", "steps": [{"key": None, "title": "읽기", "checks": [0, 0]}, {"key": None, "title": "고치기", "checks": [0, 0]}]}
+        done = [{"key": None, "title": "읽기", "state": "done"}]
+        self.assertIsNone(ahead.build_ahead(plan, done, [], []))
+        a = ahead.build_ahead(plan, [], [], [])
+        self.assertEqual((a["source"], a["left"]), ("계획 모드", 2))
+
+    def test_section_headings_are_not_steps(self):
+        self.assertEqual(ahead.plan_steps("# 계획\n## Context\n설명\n## Verification\n확인\n"), [])
+        self.assertEqual(ahead.plan_steps("# 계획\n\n1. 하나뿐\n"), [])
+
+    def test_korean_particle_after_number(self):
+        out = ahead.guess_states(steps("T1", "T2"), [], ["Task 1을 끝냄"], [{"key": None, "title": "Task 2를 하는 중", "state": "working"}])
+        self.assertEqual([s["state"] for s in out], ["done", "working"])
+        self.assertEqual([s["key"] for s in ahead.plan_steps("### Task 1.5: 중간\n### Task 2: 둘\n")], ["T2"])
+
+    def test_inferred_done_is_not_exact(self):
+        out = ahead.guess_states(steps("T1", "T2"), [{"key": "T2", "running": True, "ended": ""}], [],
+                                 [{"key": None, "title": "Task 1 읽기", "state": "todo"}])
+        self.assertEqual((out[0]["state"], out[0]["exact"]), ("done", False))
+
+
 if __name__ == "__main__":
     unittest.main()

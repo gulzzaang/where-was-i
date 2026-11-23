@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ahead  # noqa: E402  남은 일을 뽑고 고르는 순수 함수
+import history  # noqa: E402  세션을 넘어 지난 기록(되풀이 지적 · 일지 · 지난 세션 찾기)
 
 HOME = os.path.expanduser("~")
 CLAUDE = os.path.join(HOME, ".claude")
@@ -740,13 +741,7 @@ def save_state(path, st):
 RELEVANT = {"Skill", "Write", "AskUserQuestion", "Agent", "TaskCreate", "TaskUpdate", "TodoWrite", "ExitPlanMode", "Bash"}
 
 
-def commit_message(cmd):
-    """git commit 명령에서 커밋 글 첫 줄을 꺼낸다(-m \"…\" 또는 heredoc)."""
-    m = re.search(r"<<-?\s*['\"]?(\w+)['\"]?\s*\n\s*(\S[^\n]*)", cmd or "")
-    if m:
-        return m.group(2).strip()
-    m = re.search(r"-m\s+([\"'])(.*?)\1", cmd or "", re.S)
-    return m.group(2).strip().splitlines()[0] if m and m.group(2).strip() else ""
+commit_message = history.commit_message  # 커밋 글 꺼내기는 history 와 같이 쓴다
 
 
 def open_turn(st, ts, said, asked, kind):
@@ -2341,6 +2336,8 @@ def build_copilot_map(path, alive, sid="", working_hint=False):
 
 
 def main(argv):
+    if len(argv) >= 2 and argv[1] in ("journal", "find", "nags"):
+        return {"journal": history.cli_journal, "find": history.cli_find, "nags": history.cli_nags}[argv[1]](argv[2:])
     if len(argv) < 2 or argv[1] not in ("list", "map"):
         print(__doc__)
         return 2

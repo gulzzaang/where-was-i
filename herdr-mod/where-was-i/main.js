@@ -65,6 +65,8 @@ export default class WhereWasI extends View {
     this.phase = null;
     this.open = {};
     this.showAhead = false;  // 「앞으로 N」 칩을 눌러 남은 일 목록을 보는 중
+    this.showNags = false;   // 아래 줄 「되풀이 지적」을 눌러 세션을 넘은 바로잡은 말을 보는 중
+    this.nags = null;
     this.busy = false;
     this.convOpen = {};    // 카드마다 「대화」 펼침
     this.turnOpen = {};    // 지시 카드 하나 전체 보기
@@ -74,6 +76,7 @@ export default class WhereWasI extends View {
       for (;;) {
         const c = await nextCommand();
         if (c === "toggle") this.convOpen = {};
+        if (c === "nags") { this.showNags = !this.showNags; if (this.showNags) this.loadNags(cx); }
         if (c === "ahead") {
           const has = !!(this.data && this.data.ahead && this.data.ahead.left > 0);
           this.showAhead = has ? !this.showAhead : false;  // 남은 일이 없으면 켜 두지 않는다
@@ -117,6 +120,47 @@ export default class WhereWasI extends View {
       this.busy = false;
       cx.notify();
     });
+  }
+
+  loadNags(cx) {
+    cx.spawn(async (cx) => {
+      try {
+        const r = await exec("python3", [SCRIPT(), "nags", "--days", "7"], { timeout: 60000 });
+        this.nags = JSON.parse(r.stdout || "{}");
+      } catch (e) { this.nags = { groups: [], error: String(e) }; }
+      cx.notify();
+    });
+  }
+
+  nagsList(t) {
+    const c = palette(t);
+    const n = this.nags;
+    const rows = [
+      h_flex().items_center().gap(8).children([
+        div().text_size(16).font_semibold().child("되풀이 지적"),
+        div().text_size(11).text_color(t.dim).child("최근 7일 · 모든 세션"),
+      ]),
+      div().text_size(11).text_color(t.muted).child("바로잡은 말 · AI 사과를 모아 비슷한 말끼리 묶음(낱말 겹침으로 짐작)"),
+    ];
+    if (!n) rows.push(div().text_size(12).text_color(t.dim).child("읽는 중…"));
+    else if (!(n.groups || []).length) rows.push(div().text_size(12).text_color(t.dim).child("최근 7일에 바로잡은 말이 없어요."));
+    else (n.groups || []).slice(0, 12).forEach((g, i) => {
+      const key = `nag-${i}`;
+      const open = !!this.open[key];
+      rows.push(v_flex().id(key).gap(3).p(8).rounded(7).bg(t.background).border(1).border_color(g.count > 1 ? c.ask : t.border)
+        .on_click((_e, cx) => { this.open[key] = !open; cx.notify(); })
+        .children([
+          h_flex().items_center().gap(6).children([
+            div().text_size(11).font_semibold().text_color(g.count > 1 ? c.ask : t.muted).child(`${g.count}번`),
+            div().text_size(11).text_color(t.dim).child(`${g.latest.date} ${g.latest.time}`),
+            div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(g.latest.session || ""),
+          ]),
+          div().text_size(12).text_color(t.foreground).child(g.latest.said.length > 140 ? g.latest.said.slice(0, 139) + "…" : g.latest.said),
+          g.latest.reply ? div().text_size(11).text_color(t.muted).child(`→ ${g.latest.reply}`) : div(),
+          ...(open ? g.examples.slice(1).map((x) => div().text_size(11).text_color(t.muted).child(`${x.date} · ${x.said.slice(0, 100)}`)) : []),
+        ]));
+    });
+    return v_flex().gap(7).children(rows);
   }
 
   loadSessions(cx) {
@@ -462,7 +506,10 @@ export default class WhereWasI extends View {
     const parts = [];
     const aheadOn = d.ahead && d.ahead.left > 0;
     if (d.phases.length || aheadOn) parts.push(this.road(d, t, idx));
-    if (this.showAhead && aheadOn) {
+    if (this.showNags) {
+      parts.length = 0;
+      parts.push(this.nagsList(t));
+    } else if (this.showAhead && aheadOn) {
       parts.push(this.aheadList(d.ahead, t));
     } else if (p) {
       parts.push(v_flex().gap(3).children([
@@ -486,8 +533,12 @@ export default class WhereWasI extends View {
       v_flex().id("pm-body").flex_1().min_h(0).overflow_y_scrollbar().children([
         v_flex().px(14).pt(10).pb(12).gap(10).children(parts),
       ]),
-      div().px(14).py(6).border_t(1).border_color(t.border).text_size(10).text_color(t.dim)
-        .child(`${d.source === "hook+log" ? "훅 + 대화 기록" : d.source === "db" ? "OpenCode 기록에서 읽음" : "대화 기록에서 읽음"} · ${d.built}${this.busy ? " · 다시 읽는 중" : ""}`),
+      h_flex().items_center().px(14).py(6).border_t(1).border_color(t.border).children([
+        div().flex_1().min_w(0).truncate().text_size(10).text_color(t.dim).child(`${d.source === "hook+log" ? "훅 + 대화 기록" : d.source === "db" ? "OpenCode 기록에서 읽음" : "대화 기록에서 읽음"} · ${d.built}${this.busy ? " · 다시 읽는 중" : ""}`),
+        div().id("nags-btn").px(6).rounded(5).hover((s) => s.bg(t.raised))
+          .on_click((_e, cx) => { this.showNags = !this.showNags; if (this.showNags) this.loadNags(cx); cx.notify(); })
+          .child(div().text_size(10).text_color(this.showNags ? palette(t).work : t.muted).child(this.showNags ? "되풀이 지적 닫기" : "되풀이 지적")),
+      ]),
     ]);
   }
 }

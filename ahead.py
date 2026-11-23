@@ -100,3 +100,68 @@ def plan_steps(md_text):
         return [{"key": None, "title": t, "checks": [0, 0]} for t in nums if t]
     heads = [_clean_title(m.group(2)) for m in (ANY_HEAD.match(ln) for ln in lines) if m and len(m.group(1)) == 2]
     return [{"key": None, "title": t, "checks": [0, 0]} for t in heads if t]
+
+
+# ── 끝남 짐작과 고르기 ─────────────────────────────────────────────
+
+def _num(key):
+    return key[1:] if key and key.startswith("T") else None
+
+
+def _mentions(text, n):
+    return bool(re.search(r"\bTask\s*" + re.escape(n) + r"\b", text or "")) or bool(re.search(r"\bT" + re.escape(n) + r"\b", text or ""))
+
+
+def guess_states(steps, helpers, commits, tasks):
+    """계획 단계마다 상태를 짐작한다(설계 순서: 할 일 목록 → 체크 칸 → 도우미 → 커밋 → 뒤 단계)."""
+    out = []
+    for s in steps:
+        n = _num(s.get("key"))
+        state, exact = None, False
+        if n:
+            hit = next((t for t in tasks if re.search(r"\bTask\s*" + re.escape(n) + r"\b", t.get("title") or "")), None)
+            if hit:
+                state, exact = hit["state"], True
+        checks = s.get("checks") or [0, 0]
+        if state is None and checks[1] > 0 and checks[0] >= checks[1]:
+            state = "done"
+        if state is None and n:
+            mine = [h for h in helpers if h.get("key") == s.get("key")]
+            if mine:
+                last = mine[-1]
+                if last.get("running"):
+                    state = "working"
+                elif last.get("ended") and last["ended"] != "completed":
+                    state = "stopped"
+                else:
+                    state = "done"
+        if state is None and n and any(_mentions(c, n) for c in commits):
+            state = "done"
+        out.append(dict(s, state=state or "todo", exact=exact))
+    later = False
+    for s in reversed(out):
+        if s["state"] == "todo" and later:
+            s["state"] = "done"
+        if s["state"] in ("working", "done", "stopped"):
+            later = True
+    return out
+
+
+def _pack(source, guess, items):
+    left = [x for x in items if x["state"] != "done"]
+    if not left:
+        return None
+    first = next((x for x in left if x["state"] == "working"), None) or next((x for x in left if x["state"] == "todo"), None) or left[0]
+    return {"source": source, "guess": guess, "items": items, "left": len(left),
+            "next": (first["key"] + " " + first["title"]) if first.get("key") else first["title"]}
+
+
+def build_ahead(plan, tasks, helpers, commits):
+    """계획(계획서 · 계획 모드)에 남은 단계가 있으면 그것, 아니면 할 일 목록, 둘 다 없으면 None."""
+    if plan and plan.get("steps"):
+        packed = _pack(plan.get("source") or "계획서", True, guess_states(plan["steps"], helpers, commits, tasks))
+        if packed:
+            return packed
+    if tasks:
+        return _pack("할 일 목록", False, [dict(t, exact=True) for t in tasks])
+    return None

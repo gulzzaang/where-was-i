@@ -74,5 +74,41 @@ class PlanStepsTests(unittest.TestCase):
         self.assertEqual(ahead.plan_steps("그냥 설명 글입니다."), [])
 
 
+def steps(*keys, checks=None):
+    return [{"key": k, "title": f"{k} 일", "checks": list((checks or {}).get(k, [0, 0]))} for k in keys]
+
+
+class GuessTests(unittest.TestCase):
+    def test_guess_from_helpers_and_commits(self):
+        helpers = [{"key": "T2", "running": False, "ended": "completed"}, {"key": "T3", "running": True, "ended": ""}]
+        out = ahead.guess_states(steps("T1", "T2", "T3", "T4"), helpers, [], [])
+        self.assertEqual([s["state"] for s in out], ["done", "done", "working", "todo"])
+
+    def test_guess_commit_and_stopped(self):
+        out = ahead.guess_states(steps("T1", "T2"), [{"key": "T2", "running": False, "ended": "failed"}], ["ADD: Task 1 끝"], [])
+        self.assertEqual([s["state"] for s in out], ["done", "stopped"])
+
+    def test_task_list_overrides_plan_guess(self):
+        out = ahead.guess_states(steps("T1", checks={"T1": [0, 2]}), [], [],
+                                 [{"key": None, "title": "Task 1 설정 읽기", "state": "working"}])
+        self.assertEqual(out[0]["state"], "working")
+        self.assertTrue(out[0]["exact"])
+
+    def test_build_ahead_prefers_plan_then_tasks(self):
+        tasks = [{"key": None, "title": "README", "state": "todo"}]
+        plan = {"source": "계획서", "steps": steps("T1", "T2", "T3")}
+        a = ahead.build_ahead(plan, tasks, [{"key": "T2", "running": False, "ended": "completed"}], [])
+        self.assertEqual(a["source"], "계획서")
+        self.assertTrue(a["guess"])
+        self.assertEqual(a["next"], "T3 T3 일")
+        self.assertEqual(a["left"], 1)
+        done_plan = {"source": "계획서", "steps": steps("T1", checks={"T1": [2, 2]})}
+        b = ahead.build_ahead(done_plan, tasks, [], [])
+        self.assertEqual((b["source"], b["guess"], b["left"], b["next"]), ("할 일 목록", False, 1, "README"))
+        self.assertTrue(b["items"][0]["exact"])
+        self.assertIsNone(ahead.build_ahead(None, [], [], []))
+        self.assertIsNone(ahead.build_ahead(None, [{"key": None, "title": "끝난 일", "state": "done"}], [], []))
+
+
 if __name__ == "__main__":
     unittest.main()

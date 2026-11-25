@@ -90,6 +90,8 @@ class MultiAgentTests(unittest.TestCase):
         self.assertEqual(tn["tests"], "통과")
         self.assertIn("test_pay.py", tn["files"])
         self.assertIn("Code Reviewer", tn["helpers"])
+        self.assertIn("서브에이전트(Code Reviewer)", tn["acts"])
+        self.assertNotIn("도우미", json.dumps(mp, ensure_ascii=False))
 
     def test_opencode_sqlite_parsing_and_list(self):
         dbp = self.home / ".local" / "share" / "opencode" / "opencode.db"

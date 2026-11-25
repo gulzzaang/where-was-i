@@ -339,6 +339,23 @@ class HookIntegrationTests(unittest.TestCase):
         after_un = json.loads(spath.read_text(encoding="utf-8"))
         self.assertEqual(after_un, orig)
 
+    def test_subagent_wording_in_card_and_act(self):
+        """pmap · 훅이 서브에이전트 카드와 한 일에 「서브에이전트」를 찍고 「도우미」를 찍지 않는다."""
+        sid = "sess-subagent-wording"
+        self.run_hook({"session_id": sid, "hook_event_name": "SessionStart", "cwd": "/tmp/sub"})
+        self.run_hook({
+            "session_id": sid, "hook_event_name": "PreToolUse",
+            "tool_name": "Agent", "tool_use_id": "ag-1", "tool_input": {"description": "코드 검토"},
+        })
+        self.run_hook({"session_id": sid, "hook_event_name": "SubagentStart", "agent_id": "sub-noname", "agent_type": ""})
+
+        mp = self.run_pmap("map", "--terminal", "t42")
+        dumped = json.dumps(mp, ensure_ascii=False)
+        self.assertNotIn("도우미", dumped)
+        card = mp["phases"][0]["cards"][0]
+        self.assertEqual(card["helpers"][0]["name"], "서브에이전트")
+        self.assertEqual(mp["direct"]["ev"]["now"], "서브에이전트 부르는 중")
+
 
 if __name__ == "__main__":
     unittest.main()

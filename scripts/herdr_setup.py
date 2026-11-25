@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""where was i — herdr 칸 · Claude Code 훅 설치 · 지우기.
+"""where was i — herdr 패널 · Claude Code 훅 설치 · 지우기.
 
-  python3 scripts/herdr_setup.py install    칸 복사 · 레이아웃(main-progress) · 단축키 · Claude 훅(토큰 0)
+  python3 scripts/herdr_setup.py install    패널 복사 · 레이아웃(main-progress) · 단축키 · Claude 훅(토큰 0)
   python3 scripts/herdr_setup.py update     저장소를 새로 받고(git pull) 다시 설치
-  python3 scripts/herdr_setup.py uninstall  위를 모두 걷는다(칸 · 레이아웃은 휴지통으로, 단축키 · 훅은 우리 것만)
+  python3 scripts/herdr_setup.py uninstall  위를 모두 걷는다(패널 · 레이아웃은 휴지통으로, 단축키 · 훅은 우리 것만)
 
 정해 둔 설치 자리: ~/.where-was-i (git clone https://github.com/gulzzaang/where-was-i.git ~/.where-was-i)
 
 단축키
-  ⌘⇧I  오른쪽 칸 숨김 · 보임 (숨기면 기록을 읽지 않는다)
+  ⌘⇧I  오른쪽 패널 숨김 · 보임 (숨기면 기록을 읽지 않는다)
   ⌘⌥I  아예 켜기 · 끄기 (기본 화면 main ↔ 진행 지도 화면 main-progress)
 """
 import json, os, shutil, subprocess, sys, time
@@ -203,7 +203,7 @@ def install():
     shutil.copy(os.path.join(MOD_SRC, "mod.json"), os.path.join(MOD_DST, "mod.json"))
     js = open(os.path.join(MOD_SRC, "main.js")).read().replace("__WWI_PMAP__", os.path.join(REPO, "pmap.py"))
     open(os.path.join(MOD_DST, "main.js"), "w").write(js)
-    print("칸 복사:", MOD_DST, "(기록 읽기:", os.path.join(REPO, "pmap.py") + ")")
+    print("패널 복사:", MOD_DST, "(기록 읽기:", os.path.join(REPO, "pmap.py") + ")")
     if not os.path.exists(LAYOUT):
         app("do", "layout.clone", "--name", "main", "--as", "main-progress")
         for _ in range(30):
@@ -218,7 +218,7 @@ def install():
         # 보통은 가운데 줄(work-body) 오른쪽. herdr 판이 달라 그 이름이 없으면 터미널 블록(main)이 든 줄 오른쪽.
         host = find(d, "work-body") or parent_of(d, "main")
         if not host:
-            print("✗ 이 herdr 판의 화면 배치에서 칸을 붙일 자리를 못 찾음 — 레이아웃 파일을 사람이 봐야 함:", LAYOUT)
+            print("✗ 이 herdr 버전의 화면 배치에서 패널을 붙일 자리를 못 찾음 — 레이아웃 파일을 사람이 봐야 함:", LAYOUT)
             sys.exit(1)
         host.setdefault("children", []).append(BLOCK)
         json.dump(d, open(LAYOUT, "w"), ensure_ascii=False, indent=1)
@@ -232,21 +232,21 @@ def install():
             continue
         k[sec][key] = act
     json.dump(k, open(KEYS, "w"), ensure_ascii=False, indent=2)
-    print("단축키: ⌘⇧I 칸 숨김 · 보임, ⌘⌥I 아예 켜기 · 끄기")
+    print("단축키: ⌘⇧I 패널 숨김 · 보임, ⌘⌥I 아예 켜기 · 끄기")
     if os.path.isdir(CLAUDE_DIR) or shutil.which("claude"):
         if install_hooks():
             print("Claude 훅(토큰 0):", CLAUDE_SETTINGS, "(백업: .bak-where-was-i, 새로 여는 세션부터 적용)")
     # 설치 뒤 스스로 확인
     chk = app("check", MOD_DST)
-    print("· 칸 검사:", "통과" if chk.returncode == 0 else "실패 — " + (chk.stdout + chk.stderr).strip()[-300:])
+    print("· 패널 검사:", "통과" if chk.returncode == 0 else "실패 — " + (chk.stdout + chk.stderr).strip()[-300:])
     hchk = subprocess.run([sys.executable, HOOK_SCRIPT, "--self-check"], capture_output=True, text=True, timeout=10)
     print("· 훅 검사:", "통과" if hchk.returncode == 0 and hchk.stdout.strip() == "ok" else "실패 — " + (hchk.stdout + hchk.stderr).strip()[-200:])
     try:
         n = len(json.loads(subprocess.run([sys.executable, os.path.join(REPO, "pmap.py"), "list"], capture_output=True, text=True, timeout=60).stdout or "[]"))
-        print(f"· 지금 떠 있는 세션 {n}개 찾음" + ("" if n else " — Claude Code 를 herdr 안에서 하나 열면 칸에 나온다"))
+        print(f"· 지금 떠 있는 세션 {n}개 찾음" + ("" if n else " — Claude Code 를 herdr 안에서 하나 열면 패널에 나온다"))
     except Exception as e:
         print("· 세션 찾기 실패:", e)
-    print("끝. herdr 에서 ⌘⌥I 를 누르면 칸이 나온다.")
+    print("끝. herdr 에서 ⌘⌥I 를 누르면 패널이 나온다.")
 
 
 def update():

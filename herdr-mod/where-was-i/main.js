@@ -248,7 +248,7 @@ export default class WhereWasI extends View {
     const rows = [
       h_flex().items_center().gap(8).children([
         pill,
-        div().text_size(11).text_color(t.dim).child(`${d.days}일째 · 도우미 ${d.helpers}번`),
+        div().text_size(11).text_color(t.dim).child(`${d.days}일째 · 서브에이전트 ${d.helpers}번`),
         div().flex_1(),
         h_flex().id("pick").items_center().gap(3).px(6).py(1).rounded(6).hover((s) => s.bg(t.raised))
           .on_click((_e, cx) => { this.picking = !this.picking; if (this.picking) this.loadSessions(cx); cx.notify(); })
@@ -290,7 +290,7 @@ export default class WhereWasI extends View {
     const rows = [
       h_flex().id("pick-follow").px(10).py(6).rounded(6).hover((s) => s.bg(t.raised))
         .on_click((_e, cx) => { this.pick = null; this.picking = false; this.phase = null; this.open = {}; this.showAhead = false; this.lastTerm = null; this.refresh(cx); cx.notify(); })
-        .child(div().text_size(12).text_color(palette(t).work).child("지금 보는 칸 따라가기")),
+        .child(div().text_size(12).text_color(palette(t).work).child("지금 보는 패널 따라가기")),
       ...this.sessions.map((s) => h_flex().id(`pick-${s.session}`).items_center().gap(8).px(10).py(6).rounded(6).hover((x) => x.bg(t.raised))
         .on_click((_e, cx) => { this.pick = s.session; this.picking = false; this.phase = null; this.open = {}; this.showAhead = false; this.refresh(cx); cx.notify(); })
         .children([
@@ -468,12 +468,12 @@ export default class WhereWasI extends View {
     }
     if (tn.first) rows.push(div().text_size(11).text_color(t.muted).child(`알아들음 · ${cut(tn.first, 90)}`));
     const chips = [];
-    if (tn.helpers && tn.helpers.length) chips.push(this.chip(`도우미 ${tn.helpers.length}`, t));
+    if (tn.helpers && tn.helpers.length) chips.push(this.chip(`서브에이전트 ${tn.helpers.length}`, t));
     if (tn.files && tn.files.length) chips.push(this.chip(`파일 ${tn.files.length}`, t));
     if (tn.commits) chips.push(this.chip(`커밋 ${tn.commits}`, t, c.done));
     if (tn.tests) chips.push(this.chip(`시험 ${tn.tests}`, t, tn.tests === "통과" ? c.done : c.ask));
     if (chips.length) rows.push(h_flex().flex_wrap().gap(4).children(chips));
-    if (full && tn.helpers && tn.helpers.length) rows.push(div().text_size(11).text_color(t.muted).child(`도우미 · ${tn.helpers.join(" · ")}`));
+    if (full && tn.helpers && tn.helpers.length) rows.push(div().text_size(11).text_color(t.muted).child(`서브에이전트 · ${tn.helpers.join(" · ")}`));
     if (full && tn.files && tn.files.length) rows.push(div().text_size(11).text_color(t.muted).child(`고친 파일 · ${tn.files.join(", ")}`));
     if (working) rows.push(div().text_size(11).text_color(c.work).child("지금 이 지시를 하는 중"));
     else if (tn.last) rows.push(div().text_size(11).text_color(t.foreground).child(`끝에 한 말 · ${full ? tn.last : firstSent(tn.last)}`));
@@ -496,7 +496,7 @@ export default class WhereWasI extends View {
     if (!d) return root.child(div().p(16).text_size(12).text_color(t.dim).child(this.err || "지도를 읽는 중…"));
     if (d.error) {
       return root.children([
-        div().p(16).text_size(12).text_color(t.dim).child("이 칸에는 AI 세션이 없어요. 다른 칸을 보거나 세션을 골라 주세요."),
+        div().p(16).text_size(12).text_color(t.dim).child("이 패널에는 AI 세션이 없어요. 다른 패널을 보거나 세션을 골라 주세요."),
         div().id("pick2").mx(16).text_size(12).text_color(palette(t).work).on_click((_e, cx) => { this.picking = !this.picking; if (this.picking) this.loadSessions(cx); cx.notify(); }).child("세션 고르기"),
         this.picking ? this.picker(t, cx) : div(),
       ]);

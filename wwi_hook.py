@@ -195,7 +195,7 @@ def summarize_tool_input(tool, inp):
             "desc": short(inp.get("description") or "", 120),
             "atype": str(inp.get("subagent_type") or "")[:60],
             "model": str(inp.get("model") or "")[:60],
-            "act": "도우미 부르는 중",
+            "act": "서브에이전트 부르는 중",
         }
     if tool == "Skill":
         return {"skill": str(inp.get("skill") or "")[:80], "act": "스킬 실행 중"}

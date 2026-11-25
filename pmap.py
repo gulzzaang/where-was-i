@@ -1104,7 +1104,7 @@ def build_map(sid, tr, hook_state=None):
             kind = helper_kind("", atype)
             h = {
                 "id": "hook:" + aid, "agent_id": aid,
-                "name": atype or "도우미", "kind": kind, "key": None,
+                "name": atype or "서브에이전트", "kind": kind, "key": None,
                 "job": "", "start": sub.get("started_at"), "end": ev.get("last"),
                 "jsonl": sub.get("transcript") or None, "model": "",
                 "ended": "", "after": "", "report": "", "running": True,
@@ -1828,7 +1828,7 @@ def build_antigravity_map(path, alive, sid=""):
                         role = _unwrap_arg(args.get("Role") or args.get("TypeName") or "서브에이전트")
                         helpers_count += 1
                         cur["helpers"].append(short(role, 40))
-                        act = f"도우미({short(role, 20)})"
+                        act = f"서브에이전트({short(role, 20)})"
                     elif tname == "ask_question":
                         raw_q = str(args.get("questions") or "")
                         qm = re.search(r'"question"\s*:\s*"([^"]{1,200})"', raw_q)
@@ -2072,9 +2072,9 @@ def build_opencode_map(db_path, oc_sid, alive):
                     elif tname in ("read", "grep", "glob", "list", "find"):
                         act = "코드 읽음"
                     elif tname in ("task", "subagent"):
-                        desc = short(inp.get("description") or "도우미", 30)
+                        desc = short(inp.get("description") or "서브에이전트", 30)
                         cur["helpers"].append(desc)
-                        act = f"도우미({desc})"
+                        act = f"서브에이전트({desc})"
                     elif tname in ("question", "ask"):
                         if status in ("pending", "running"):
                             asked = short(inp.get("question") or "질문 답 기다리는 중", 160)
@@ -2230,9 +2230,9 @@ def _copilot_tool_act(tname, args, cur):
     if tl in ("view", "read", "read_file", "grep", "glob", "list_dir", "find"):
         return "코드 읽음", ""
     if tl in ("task", "subagent", "agent"):
-        desc = short(args.get("description") or "도우미", 30)
+        desc = short(args.get("description") or "서브에이전트", 30)
         cur["helpers"].append(desc)
-        return f"도우미({desc})", ""
+        return f"서브에이전트({desc})", ""
     if tl in ("ask_user", "ask_questions"):
         return "질문함", "ask"
     return (tname or "도구"), ""
